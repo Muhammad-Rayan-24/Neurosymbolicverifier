@@ -189,7 +189,7 @@ RULE_{idx}:
     prompt = f"""You are a strict constraint auditor for a neurosymbolic AI system.
 
 DRAFT TEXT:
-\"\"\"{draft_text[:5000]}\"\"\"
+\"\"\"{draft_text[:40000]}\"\"\"
 
 RULES TO AUDIT:
 {rules_block}
@@ -270,7 +270,7 @@ UNIT: {unit}
 HINT: {rule.get('extraction_hint', '')}
 
 DRAFT:
-\"\"\"{draft_text[:4000]}\"\"\"
+\"\"\"{draft_text[:40000]}\"\"\"
 
 Return ONLY raw JSON with graded compliance_score [0.0-1.0]:
 {{
