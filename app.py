@@ -892,7 +892,7 @@ with col_right:
     if st.session_state.results:
         res  = st.session_state.results
         tabs = st.tabs(["📊 Verdict", "📄 Draft", "🔍 Audit",
-                        "💡 Insight", "🧠 Second Brain", "🌐 Sources", "🗂 Raw JSON"])
+                        "💡 Insight", "🧠 Second Brain", "🌐 Sources", "🗂 Raw JSON", "📋 Report"])
 
         # ── Tab 1: Verdict ────────────────────────────────────────────────────
         with tabs[0]:
@@ -1301,6 +1301,261 @@ with col_right:
                                data=json.dumps(res, indent=2, default=str),
                                file_name="pipeline_results.json",
                                mime="application/json", key="dl_json")
+
+        # ── Tab 8: Human-Readable Transparency Report ───────────────────────
+        with tabs[7]:
+            st.markdown('<div class="section-label">📋 Transparency Report</div>', unsafe_allow_html=True)
+
+            _audit   = res.get("audit", [])
+            _score   = res.get("ltn_score", 0)
+            _thresh  = res.get("ltn_threshold", 0.8)
+            _passed  = res.get("passed", False)
+            _iters   = res.get("iterations_used", 1)
+            _max_it  = res.get("max_iterations", 5)
+            _run_id  = res.get("run_id", "")
+            _rules   = res.get("structured_rules", [])
+            _history = res.get("iteration_history", [])
+            _sources = res.get("sources", [])
+            _n_pass  = sum(1 for r in _audit if r.get("satisfies"))
+            _n_fail  = len(_audit) - _n_pass
+            _verdict = "PASSED" if _passed else "DID NOT PASS"
+            _v_color = "#6dcea8" if _passed else "#e8736d"
+
+            # ── Section 1: Plain-English Summary ─────────────────────────────
+            st.markdown(f"""
+<div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);
+     border-radius:16px;padding:1.4rem 1.6rem;margin-bottom:1.2rem;">
+  <div style="font-family:'DM Serif Display',serif;font-size:1.5rem;color:#f0ebe0;margin-bottom:0.6rem;">
+    What happened in this run?
+  </div>
+  <p style="font-size:0.88rem;color:rgba(232,228,220,0.7);line-height:1.75;margin:0;">
+    You asked the system to generate content and verify it against <strong style="color:#c8a96e">{len(_rules)} rules</strong>.
+    The system {"researched the topic online and " if _sources else ""}parsed your rules into formal logical constraints,
+    generated a draft, then mathematically checked every rule against the output.
+    After <strong style="color:#c8a96e">{_iters} iteration{"s" if _iters > 1 else ""}</strong> of generate → verify → rewrite,
+    the final LTN verification score was
+    <strong style="color:{_v_color}">{_score:.4f}</strong> against a pass threshold of {_thresh:.2f}
+    — the run <strong style="color:{_v_color}">{_verdict}</strong>.
+    {f"<br><br><em style='color:rgba(232,228,220,0.45);font-size:0.82rem;'>The system rewrote the draft {_iters-1} time(s) based on specific violation feedback before reaching this result.</em>" if _iters > 1 else ""}
+  </p>
+</div>""", unsafe_allow_html=True)
+
+            # ── Section 2: What is the LTN Score? ────────────────────────────
+            st.markdown(f"""
+<div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.07);
+     border-radius:14px;padding:1.2rem 1.5rem;margin-bottom:1.2rem;">
+  <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.12em;
+              color:#c8a96e;font-weight:600;margin-bottom:0.7rem;">
+    What does the score {_score:.4f} mean?
+  </div>
+  <p style="font-size:0.84rem;color:rgba(232,228,220,0.65);line-height:1.75;margin:0 0 0.6rem 0;">
+    The LTN (Logic Tensor Network) score is a single number between 0 and 1 that summarises
+    how well the generated content satisfied <em>all</em> your rules simultaneously.
+    It is not an average — it uses fuzzy logic so that a single badly-violated rule
+    pulls the whole score down significantly.
+  </p>
+  <div style="display:flex;gap:1.5rem;flex-wrap:wrap;margin-top:0.6rem;">
+    <div style="font-size:0.81rem;color:rgba(232,228,220,0.5);">
+      <span style="color:#6dcea8;font-weight:600;">≥ {_thresh:.2f}</span> — PASS (all constraints sufficiently satisfied)
+    </div>
+    <div style="font-size:0.81rem;color:rgba(232,228,220,0.5);">
+      <span style="color:#e8c06d;font-weight:600;">0.50 – {_thresh:.2f}</span> — MARGINAL (minor violations)
+    </div>
+    <div style="font-size:0.81rem;color:rgba(232,228,220,0.5);">
+      <span style="color:#e8736d;font-weight:600;">below 0.50</span> — FAIL (significant violations)
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+            # ── Section 3: Rules — plain English per rule ─────────────────────
+            st.markdown("""
+<div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.12em;
+            color:#c8a96e;font-weight:600;margin-bottom:0.8rem;">
+  How did each rule perform?
+</div>""", unsafe_allow_html=True)
+
+            for r in _audit:
+                compliance  = r.get("compliance_score", 1.0 if r.get("satisfies") else 0.0)
+                satisfies   = r.get("satisfies", False)
+                rule_disp   = r.get("rule_display","").replace("<","&lt;")
+                explanation = r.get("explanation","").replace("<","&lt;")
+                extracted   = str(r.get("extracted_value_raw","N/A")).replace("<","&lt;")
+                scope_val   = r.get("scope","always")
+                src_name    = r.get("source_name","")
+                method      = "hard math (symbolic)" if r.get("symbolic_check_used") else "AI semantic judgement"
+                conv_note   = r.get("unit_conversion_note","")
+
+                if compliance >= 0.8:
+                    icon = "✅"; bar_c = "#6dcea8"; verdict_txt = f"Passed ({int(compliance*100)}% compliance)"
+                elif compliance >= 0.5:
+                    icon = "⚠️"; bar_c = "#e8c06d"; verdict_txt = f"Partially satisfied ({int(compliance*100)}% compliance)"
+                else:
+                    icon = "❌"; bar_c = "#e8736d"; verdict_txt = f"Failed ({int(compliance*100)}% compliance)"
+
+                scope_plain = {
+                    "always"      : "checked every occurrence",
+                    "initial"     : "checked only the first/starting value",
+                    "final"       : "checked only the final value",
+                    "maximum"     : "checked the highest value found",
+                    "minimum"     : "checked the lowest value found",
+                    "conditional" : "checked only when a specific condition was met",
+                    "context_only": "verified the value was used as context (not enforced strictly)",
+                }.get(scope_val, scope_val)
+
+                src_note = f" · Source: {src_name}" if src_name else ""
+                conv_html = f'<div style="font-size:0.76rem;color:rgba(200,169,110,0.55);margin-top:0.2rem;">Unit conversion: {conv_note}</div>' if conv_note and conv_note.lower() not in ("none","") else ""
+
+                st.markdown(f"""
+<div style="border-left:4px solid {bar_c};border-radius:0 12px 12px 0;
+     background:rgba(255,255,255,0.02);padding:0.9rem 1.2rem;margin-bottom:0.75rem;">
+  <div style="display:flex;align-items:center;gap:0.6rem;margin-bottom:0.5rem;flex-wrap:wrap;">
+    <span style="font-size:1rem;">{icon}</span>
+    <span style="font-family:'DM Mono',monospace;font-size:0.82rem;color:#e8e4dc;flex:1;">
+      {rule_disp}
+    </span>
+    <span style="font-size:0.68rem;font-family:'DM Mono',monospace;
+                 color:{bar_c};background:rgba(255,255,255,0.04);
+                 border-radius:5px;padding:0.1rem 0.4rem;white-space:nowrap;">
+      {verdict_txt}
+    </span>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem 1.5rem;
+              font-size:0.79rem;color:rgba(232,228,220,0.55);margin-bottom:0.5rem;">
+    <div><strong style="color:rgba(232,228,220,0.35);font-size:0.68rem;
+                        text-transform:uppercase;letter-spacing:0.08em;">
+      What the system found
+    </strong><br>{extracted[:120] + ("…" if len(extracted)>120 else "")}</div>
+    <div><strong style="color:rgba(232,228,220,0.35);font-size:0.68rem;
+                        text-transform:uppercase;letter-spacing:0.08em;">
+      How it was checked
+    </strong><br>{method} · {scope_plain}{src_note}</div>
+  </div>
+  {conv_html}
+  <div style="height:3px;background:rgba(255,255,255,0.06);border-radius:2px;overflow:hidden;margin:0.4rem 0;">
+    <div style="height:100%;width:{int(compliance*100)}%;background:{bar_c};border-radius:2px;"></div>
+  </div>
+  <div style="font-size:0.79rem;color:rgba(232,228,220,0.45);margin-top:0.35rem;line-height:1.55;">
+    {explanation}
+  </div>
+</div>""", unsafe_allow_html=True)
+
+            # ── Section 4: How the rewrite loop worked ────────────────────────
+            if _history and len(_history) > 1:
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown("""
+<div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.12em;
+            color:#c8a96e;font-weight:600;margin-bottom:0.8rem;">
+  How the self-correction loop worked
+</div>""", unsafe_allow_html=True)
+
+                for h in _history:
+                    n_p  = sum(1 for r in h["audit"] if r.get("satisfies"))
+                    n_t  = len(h["audit"])
+                    lsc  = h["ltn_score"]
+                    viols = h.get("violations", [])
+                    col_s = "#6dcea8" if lsc >= _thresh else ("#e8c06d" if lsc >= 0.5 else "#e8736d")
+                    label = "Final iteration — passed" if (h["attempt"] == len(_history) and _passed) else                             ("Final iteration — did not pass" if h["attempt"] == len(_history) else
+                             f"Iteration {h['attempt']} — triggered rewrite")
+
+                    with st.expander(f"Iteration {h['attempt']}: score {lsc:.4f} · {n_p}/{n_t} rules · {label}"):
+                        if viols:
+                            st.markdown(f"""
+<p style="font-size:0.83rem;color:rgba(232,228,220,0.6);margin-bottom:0.5rem;">
+  {len(viols)} rule(s) failed in this iteration.
+  {"The system used this feedback to rewrite the draft." if h["attempt"] < len(_history) else "This was the final attempt."}
+</p>""", unsafe_allow_html=True)
+                            for v in viols:
+                                vd = v.get("rule_display","").replace("<","&lt;")
+                                ve = v.get("explanation","").replace("<","&lt;")
+                                vs = v.get("compliance_score", 0)
+                                st.markdown(f"""
+<div style="padding:0.55rem 0.8rem;background:rgba(232,115,109,0.07);
+     border-left:3px solid #e8736d;border-radius:0 8px 8px 0;
+     margin-bottom:0.4rem;font-size:0.8rem;">
+  <span style="color:#e8736d;font-weight:600;">{vd}</span>
+  <span style="color:rgba(232,228,220,0.35);font-size:0.72rem;margin-left:0.4rem;">
+    score: {vs:.2f}
+  </span>
+  <div style="color:rgba(232,228,220,0.5);margin-top:0.2rem;">{ve}</div>
+</div>""", unsafe_allow_html=True)
+                        else:
+                            st.markdown('<p style="color:#6dcea8;font-size:0.83rem;">All rules satisfied in this iteration.</p>', unsafe_allow_html=True)
+
+            # ── Section 5: Research Sources ───────────────────────────────────
+            if _sources:
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown("""
+<div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.12em;
+            color:#c8a96e;font-weight:600;margin-bottom:0.8rem;">
+  Where did the extra rules come from?
+</div>""", unsafe_allow_html=True)
+                research_rules = [r for r in _rules if r.get("source_name") not in ("User","")]
+                st.markdown(f"""
+<p style="font-size:0.83rem;color:rgba(232,228,220,0.55);line-height:1.7;margin-bottom:0.8rem;">
+  In addition to your own rules, the system researched the topic online and derived
+  <strong style="color:#c8a96e">{len(research_rules)} additional constraint(s)</strong>
+  from the following source(s):
+</p>""", unsafe_allow_html=True)
+                for src in _sources:
+                    sn  = src.get("source_name","Source")
+                    ttl = src.get("title","")
+                    ref = src.get("reference","")
+                    ctx = src.get("context","")[:200]
+                    ref_html = f'<a href="{ref}" target="_blank" style="color:#c8a96e;font-size:0.75rem;">{ref[:60]}…</a>' if ref and ref != "None" else ""
+                    st.markdown(f"""
+<div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.07);
+     border-radius:10px;padding:0.85rem 1rem;margin-bottom:0.5rem;">
+  <div style="font-size:0.82rem;font-weight:600;color:#e8e4dc;margin-bottom:0.3rem;">
+    {sn} — {ttl}
+  </div>
+  <div style="font-size:0.77rem;color:rgba(232,228,220,0.45);line-height:1.6;margin-bottom:0.3rem;">
+    "{ctx}…"
+  </div>
+  {ref_html}
+</div>""", unsafe_allow_html=True)
+
+            # ── Section 6: Download report as text ────────────────────────────
+            st.markdown("<br>", unsafe_allow_html=True)
+            _report_lines = [
+                "NEUROSYMBOLIC VERIFIER — TRANSPARENCY REPORT",
+                "=" * 55,
+                f"Run ID        : {_run_id}",
+                f"Verdict       : {_verdict}",
+                f"LTN Score     : {_score:.4f}  (threshold: {_thresh:.2f})",
+                f"Rules checked : {len(_audit)}  ({_n_pass} passed, {_n_fail} failed)",
+                f"Iterations    : {_iters} / {_max_it}",
+                "",
+                "RULES",
+                "-" * 40,
+            ]
+            for r in _audit:
+                compliance = r.get("compliance_score", 1.0 if r.get("satisfies") else 0.0)
+                status = "PASS" if r.get("satisfies") else ("PARTIAL" if compliance >= 0.5 else "FAIL")
+                _report_lines += [
+                    f"[{status} {compliance:.2f}] {r.get('rule_display','')}",
+                    f"  Found    : {str(r.get('extracted_value_raw',''))[:100]}",
+                    f"  Method   : {'Symbolic' if r.get('symbolic_check_used') else 'Semantic'}",
+                    f"  Why      : {r.get('explanation','')}",
+                    "",
+                ]
+            if _history and len(_history) > 1:
+                _report_lines += ["ITERATION HISTORY", "-" * 40]
+                for h in _history:
+                    n_p = sum(1 for r in h["audit"] if r.get("satisfies"))
+                    _report_lines.append(
+                        f"Iteration {h['attempt']}: LTN={h['ltn_score']:.4f}  {n_p}/{len(h['audit'])} rules passed"
+                    )
+                _report_lines.append("")
+
+            _report_txt = "\n".join(_report_lines)
+            st.download_button(
+                "⬇ Download Transparency Report (TXT)",
+                data      = _report_txt,
+                file_name = f"transparency_report_{_run_id}.txt",
+                mime      = "text/plain",
+                key       = "dl_report",
+                use_container_width = True,
+            )
 
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("🔄 Reset", key="reset_results"):
