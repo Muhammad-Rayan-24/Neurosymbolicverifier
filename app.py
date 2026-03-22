@@ -130,6 +130,19 @@ def _draft_to_pdf(draft_text: str, run_id: str = "", ltn_score: float = None,
             pdf.multi_cell(cw, 6, safe(line[4:].strip()), align="L")
             pdf.ln(1); continue
 
+        # Numbered list item: "1. Fact text here"
+        num_match = _r.match(r'^(\d+)\.\s+(.*)', line)
+        if num_match:
+            num   = num_match.group(1)
+            text  = safe(num_match.group(2))
+            pdf.set_font('Helvetica', '', 10); set_c(C_BODY)
+            pdf.set_x(pdf.l_margin)
+            num_w = pdf.get_string_width(num + '.  ')
+            pdf.cell(num_w, 5, num + '.')
+            pdf.set_x(pdf.l_margin + num_w)
+            pdf.multi_cell(cw - num_w, 5, text, align='L')
+            continue
+
         # Bullet
         if _r.match(r'^[-*]\s+', line):  # bullets already sanitized to '-'
             text = _r.sub(r'^[-*]\s+', '', line)
@@ -769,7 +782,7 @@ with col_right:
                     stream_box  = st.empty()
                     collected   = []
                     with client_anth.messages.stream(
-                        model=m2._MODEL, max_tokens=4096,
+                        model=m2._MODEL, max_tokens=16000,
                         messages=[{"role":"user","content":gen_prompt}]
                     ) as stream:
                         for text_chunk in stream.text_stream:
