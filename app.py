@@ -1548,14 +1548,192 @@ with col_right:
                 _report_lines.append("")
 
             _report_txt = "\n".join(_report_lines)
-            st.download_button(
-                "⬇ Download Transparency Report (TXT)",
-                data      = _report_txt,
-                file_name = f"transparency_report_{_run_id}.txt",
-                mime      = "text/plain",
-                key       = "dl_report",
-                use_container_width = True,
-            )
+
+            _rpt_col1, _rpt_col2 = st.columns(2)
+
+            with _rpt_col1:
+                st.download_button(
+                    "⬇ Download Report (TXT)",
+                    data      = _report_txt,
+                    file_name = f"transparency_report_{_run_id}.txt",
+                    mime      = "text/plain",
+                    key       = "dl_report_txt",
+                    use_container_width = True,
+                )
+
+            with _rpt_col2:
+                try:
+                    from fpdf import FPDF
+                    import re as _rre
+
+                    class _RptPDF(FPDF):
+                        def header(self):
+                            self.set_font("Helvetica", "B", 9)
+                            self.set_text_color(120, 120, 120)
+                            self.cell(0, 8, f"NeuroSymbolic Verifier -- Transparency Report  |  run {_run_id}", align="L")
+                            self.ln(2)
+                            self.set_draw_color(200, 169, 110)
+                            self.set_line_width(0.4)
+                            self.line(self.l_margin, self.get_y(),
+                                      self.w - self.r_margin, self.get_y())
+                            self.ln(3)
+                        def footer(self):
+                            self.set_y(-14)
+                            self.set_font("Helvetica", "", 8)
+                            self.set_text_color(160, 160, 160)
+                            self.cell(0, 8, f"Page {self.page_no()}", align="C")
+
+                    def _rsan(t):
+                        _MAP = [
+                            (chr(0x2014),"--"),(chr(0x2013),"-"),
+                            (chr(0x2018),"'"),(chr(0x2019),"'"),
+                            (chr(0x201C),'"'),(chr(0x201D),'"'),
+                            (chr(0x2022),"-"),(chr(0x2264),"<="),(chr(0x2265),">="),
+                            (chr(0x00B0)," deg"),(chr(0x00D7),"x"),(chr(0x2026),"..."),
+                        ]
+                        for uc, asc in _MAP:
+                            t = t.replace(uc, asc)
+                        return t.encode("latin-1", errors="replace").decode("latin-1")
+
+                    _rpdf = _RptPDF()
+                    _rpdf.set_margins(left=18, top=20, right=18)
+                    _rpdf.set_auto_page_break(auto=True, margin=16)
+                    _rpdf.add_page()
+                    _cw = _rpdf.w - _rpdf.l_margin - _rpdf.r_margin
+
+                    # Title
+                    _rpdf.set_font("Helvetica","B",18)
+                    _rpdf.set_text_color(27,58,92)
+                    _rpdf.multi_cell(_cw, 9, "Transparency Report", align="L")
+                    _rpdf.set_draw_color(46,117,182)
+                    _rpdf.set_line_width(0.5)
+                    _rpdf.line(_rpdf.l_margin, _rpdf.get_y(),
+                               _rpdf.w-_rpdf.r_margin, _rpdf.get_y())
+                    _rpdf.ln(4)
+
+                    # Summary box
+                    _rpdf.set_font("Helvetica","B",10)
+                    _rpdf.set_text_color(30,30,30)
+                    _rpdf.set_fill_color(230,240,250)
+                    _rpdf.multi_cell(_cw, 6,
+                        _rsan(f"Verdict: {_verdict}   |   LTN Score: {_score:.4f} (threshold {_thresh:.2f})"
+                              f"   |   {_n_pass}/{len(_audit)} rules passed   |   {_iters} iteration(s)"),
+                        align="L", fill=True)
+                    _rpdf.ln(4)
+
+                    # Rules section
+                    _rpdf.set_font("Helvetica","B",11)
+                    _rpdf.set_text_color(46,117,182)
+                    _rpdf.cell(_cw, 6, "Rule-by-Rule Results", ln=True)
+                    _rpdf.set_line_width(0.3)
+                    _rpdf.line(_rpdf.l_margin, _rpdf.get_y(),
+                               _rpdf.w-_rpdf.r_margin, _rpdf.get_y())
+                    _rpdf.ln(3)
+
+                    for _r in _audit:
+                        _comp  = _r.get("compliance_score", 1.0 if _r.get("satisfies") else 0.0)
+                        _stat  = "PASS" if _r.get("satisfies") else ("PARTIAL" if _comp>=0.5 else "FAIL")
+                        _col   = (55,180,130) if _r.get("satisfies") else ((220,180,80) if _comp>=0.5 else (220,100,95))
+                        _meth  = "Symbolic" if _r.get("symbolic_check_used") else "Semantic"
+                        _disp  = _rsan(_r.get("rule_display",""))
+                        _expl  = _rsan(_r.get("explanation",""))
+                        _extr  = _rsan(str(_r.get("extracted_value_raw","N/A"))[:100])
+
+                        # Status badge line
+                        _rpdf.set_font("Helvetica","B",9)
+                        _rpdf.set_text_color(*_col)
+                        _rpdf.cell(28, 5, f"[{_stat} {_comp:.2f}]")
+                        _rpdf.set_font("Helvetica","",9)
+                        _rpdf.set_text_color(30,30,30)
+                        _rpdf.multi_cell(_cw-28, 5, _disp, align="L")
+
+                        # Details
+                        _rpdf.set_font("Helvetica","",8)
+                        _rpdf.set_text_color(90,90,90)
+                        _rpdf.set_x(_rpdf.l_margin + 6)
+                        _rpdf.multi_cell(_cw-6, 4, f"Found: {_extr}", align="L")
+                        _rpdf.set_x(_rpdf.l_margin + 6)
+                        _rpdf.multi_cell(_cw-6, 4,
+                            f"Method: {_meth} | {_expl}", align="L")
+
+                        # Compliance bar
+                        _rpdf.set_x(_rpdf.l_margin + 6)
+                        _bw = (_cw - 6) * 0.4
+                        _rpdf.set_draw_color(220,220,220)
+                        _rpdf.set_line_width(0.1)
+                        _rpdf.rect(_rpdf.l_margin+6, _rpdf.get_y()+1, _bw, 2.5)
+                        _rpdf.set_fill_color(*_col)
+                        _rpdf.rect(_rpdf.l_margin+6, _rpdf.get_y()+1, _bw*_comp, 2.5, style="F")
+                        _rpdf.ln(5)
+
+                    # Iteration history
+                    if _history and len(_history) > 1:
+                        _rpdf.ln(2)
+                        _rpdf.set_font("Helvetica","B",11)
+                        _rpdf.set_text_color(46,117,182)
+                        _rpdf.cell(_cw, 6, "Self-Correction History", ln=True)
+                        _rpdf.set_line_width(0.3)
+                        _rpdf.line(_rpdf.l_margin, _rpdf.get_y(),
+                                   _rpdf.w-_rpdf.r_margin, _rpdf.get_y())
+                        _rpdf.ln(3)
+                        for _h in _history:
+                            _np  = sum(1 for _r in _h["audit"] if _r.get("satisfies"))
+                            _nt  = len(_h["audit"])
+                            _ls  = _h["ltn_score"]
+                            _lc  = (55,180,130) if _ls>=_thresh else ((220,180,80) if _ls>=0.5 else (220,100,95))
+                            _rpdf.set_font("Helvetica","B",9)
+                            _rpdf.set_text_color(*_lc)
+                            _rpdf.cell(28, 5, f"Iter {_h['attempt']}")
+                            _rpdf.set_font("Helvetica","",9)
+                            _rpdf.set_text_color(30,30,30)
+                            _rpdf.cell(_cw-28, 5,
+                                f"LTN {_ls:.4f}  |  {_np}/{_nt} rules passed", ln=True)
+                            _viols = _h.get("violations",[])
+                            if _viols:
+                                for _v in _viols:
+                                    _rpdf.set_font("Helvetica","",8)
+                                    _rpdf.set_text_color(180,80,80)
+                                    _rpdf.set_x(_rpdf.l_margin+8)
+                                    _rpdf.multi_cell(_cw-8, 4,
+                                        _rsan(f"  FAIL: {_v.get('rule_display','')}"), align="L")
+                            _rpdf.ln(1)
+
+                    # Sources
+                    if _sources:
+                        _rpdf.ln(2)
+                        _rpdf.set_font("Helvetica","B",11)
+                        _rpdf.set_text_color(46,117,182)
+                        _rpdf.cell(_cw, 6, "Research Sources Used", ln=True)
+                        _rpdf.set_line_width(0.3)
+                        _rpdf.line(_rpdf.l_margin, _rpdf.get_y(),
+                                   _rpdf.w-_rpdf.r_margin, _rpdf.get_y())
+                        _rpdf.ln(3)
+                        for _src in _sources:
+                            _rpdf.set_font("Helvetica","B",9)
+                            _rpdf.set_text_color(30,30,30)
+                            _rpdf.multi_cell(_cw, 5,
+                                _rsan(f"{_src.get('source_name','')} -- {_src.get('title','')}"),
+                                align="L")
+                            _rpdf.set_font("Helvetica","",8)
+                            _rpdf.set_text_color(90,90,90)
+                            _rpdf.multi_cell(_cw, 4,
+                                _rsan(_src.get("context","")[:200]+"..."), align="L")
+                            _rpdf.ln(2)
+
+                    _rpt_pdf_bytes = bytes(_rpdf.output())
+                    st.download_button(
+                        "⬇ Download Report (PDF)",
+                        data      = _rpt_pdf_bytes,
+                        file_name = f"transparency_report_{_run_id}.pdf",
+                        mime      = "application/pdf",
+                        key       = "dl_report_pdf",
+                        use_container_width = True,
+                    )
+                except Exception as _rpt_pdf_err:
+                    st.button("⬇ PDF unavailable", disabled=True,
+                              key="dl_report_pdf_disabled",
+                              help=str(_rpt_pdf_err),
+                              use_container_width=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("🔄 Reset", key="reset_results"):
