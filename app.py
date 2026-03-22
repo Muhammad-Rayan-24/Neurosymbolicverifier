@@ -880,6 +880,7 @@ with col_right:
             "brain_records"    : brain_records,
             "run_id"           : run_id,
             "iteration_history": iteration_history,
+            "user_prompt"      : user_prompt.strip(),
         })
         st.session_state.results           = results
         st.session_state.brain_records      = brain_records
@@ -891,6 +892,16 @@ with col_right:
     # ══════════════════════════════════════════════════════════════════════════
     if st.session_state.results:
         res  = st.session_state.results
+
+        # Build a short topic slug for filenames from the user prompt
+        def _make_slug(text: str, max_len: int = 40) -> str:
+            import re as _re
+            slug = _re.sub(r"[^a-z0-9]+", "_", text.lower().strip())
+            slug = slug.strip("_")[:max_len].rstrip("_")
+            return slug if slug else "output"
+
+        _topic_slug = _make_slug(res.get("user_prompt", "output"))
+
         tabs = st.tabs(["📊 Verdict", "📄 Draft", "🔍 Audit",
                         "💡 Insight", "🧠 Second Brain", "🌐 Sources", "🗂 Raw JSON", "📋 Report"])
 
@@ -960,7 +971,7 @@ with col_right:
                     st.download_button(
                         "⬇ Download as TXT",
                         data      = draft,
-                        file_name = f"verified_draft_{res.get('run_id','output')}.txt",
+                        file_name = f"{_topic_slug}_{res.get('run_id','output')}.txt",
                         mime      = "text/plain",
                         key       = "dl_draft_txt",
                         use_container_width = True,
@@ -980,7 +991,7 @@ with col_right:
                         st.download_button(
                             "⬇ Download as PDF",
                             data      = _pdf_bytes,
-                            file_name = f"verified_draft_{res.get('run_id','output')}.pdf",
+                            file_name = f"{_topic_slug}_{res.get('run_id','output')}.pdf",
                             mime      = "application/pdf",
                             key       = "dl_draft_pdf",
                             use_container_width = True,
@@ -1555,7 +1566,7 @@ with col_right:
                 st.download_button(
                     "⬇ Download Report (TXT)",
                     data      = _report_txt,
-                    file_name = f"transparency_report_{_run_id}.txt",
+                    file_name = f"{_topic_slug}_report_{_run_id}.txt",
                     mime      = "text/plain",
                     key       = "dl_report_txt",
                     use_container_width = True,
@@ -1657,13 +1668,17 @@ with col_right:
                             f"Method: {_meth} | {_expl}", align="L")
 
                         # Compliance bar
+                        # Safety: if near page bottom, let auto page break handle it
+                        if _rpdf.get_y() > _rpdf.h - 30:
+                            _rpdf.add_page()
                         _rpdf.set_x(_rpdf.l_margin + 6)
                         _bw = (_cw - 6) * 0.4
                         _rpdf.set_draw_color(220,220,220)
                         _rpdf.set_line_width(0.1)
-                        _rpdf.rect(_rpdf.l_margin+6, _rpdf.get_y()+1, _bw, 2.5)
+                        _y_bar = _rpdf.get_y() + 1
+                        _rpdf.rect(_rpdf.l_margin+6, _y_bar, _bw, 2.5)
                         _rpdf.set_fill_color(*_col)
-                        _rpdf.rect(_rpdf.l_margin+6, _rpdf.get_y()+1, _bw*_comp, 2.5, style="F")
+                        _rpdf.rect(_rpdf.l_margin+6, _y_bar, _bw*_comp, 2.5, style="F")
                         _rpdf.ln(5)
 
                     # Iteration history
@@ -1686,8 +1701,8 @@ with col_right:
                             _rpdf.cell(28, 5, f"Iter {_h['attempt']}")
                             _rpdf.set_font("Helvetica","",9)
                             _rpdf.set_text_color(30,30,30)
-                            _rpdf.cell(_cw-28, 5,
-                                f"LTN {_ls:.4f}  |  {_np}/{_nt} rules passed", ln=True)
+                            _rpdf.multi_cell(_cw-28, 5,
+                                f"LTN {_ls:.4f}  |  {_np}/{_nt} rules passed", align="L")
                             _viols = _h.get("violations",[])
                             if _viols:
                                 for _v in _viols:
@@ -1718,13 +1733,13 @@ with col_right:
                             _rpdf.set_text_color(90,90,90)
                             _rpdf.multi_cell(_cw, 4,
                                 _rsan(_src.get("context","")[:200]+"..."), align="L")
-                            _rpdf.ln(2)
+                            _rpdf.ln(3)
 
                     _rpt_pdf_bytes = bytes(_rpdf.output())
                     st.download_button(
                         "⬇ Download Report (PDF)",
                         data      = _rpt_pdf_bytes,
-                        file_name = f"transparency_report_{_run_id}.pdf",
+                        file_name = f"{_topic_slug}_report_{_run_id}.pdf",
                         mime      = "application/pdf",
                         key       = "dl_report_pdf",
                         use_container_width = True,
