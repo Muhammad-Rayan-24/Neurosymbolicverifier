@@ -952,27 +952,47 @@ with col_right:
                 st.markdown('<div class="section-label">✍ Final Verified Draft</div>', unsafe_allow_html=True)
                 safe = draft.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
                 st.markdown(f'<div class="gen-output">{safe}</div>', unsafe_allow_html=True)
-                # Generate PDF for download
-                try:
-                    _pdf_bytes = _draft_to_pdf(
-                        draft,
-                        run_id        = res.get("run_id", ""),
-                        ltn_score     = res.get("ltn_score"),
-                        rules_passed  = sum(1 for r in res.get("audit",[]) if r.get("satisfies")),
-                        rules_total   = len(res.get("audit",[])),
-                        iterations_used = res.get("iterations_used", 1),
-                    )
+                # ── Download buttons — always show TXT, show PDF if generation succeeds ──
+                dl_col1, dl_col2 = st.columns(2)
+
+                # TXT is always available — no dependencies, never fails
+                with dl_col1:
                     st.download_button(
-                        "⬇ Download Draft (PDF)",
-                        data      = _pdf_bytes,
-                        file_name = f"verified_draft_{res.get('run_id','output')}.pdf",
-                        mime      = "application/pdf",
-                        key       = "dl_draft"
+                        "⬇ Download as TXT",
+                        data      = draft,
+                        file_name = f"verified_draft_{res.get('run_id','output')}.txt",
+                        mime      = "text/plain",
+                        key       = "dl_draft_txt",
+                        use_container_width = True,
                     )
-                except Exception as _pdf_err:
-                    st.warning(f"PDF generation failed ({_pdf_err}) — downloading as text.")
-                    st.download_button("⬇ Download Draft (TXT)", data=draft,
-                                       file_name="verified_draft.txt", mime="text/plain", key="dl_draft_txt")
+
+                # PDF — attempt generation, show button if successful
+                with dl_col2:
+                    try:
+                        _pdf_bytes = _draft_to_pdf(
+                            draft,
+                            run_id          = res.get("run_id", ""),
+                            ltn_score       = res.get("ltn_score"),
+                            rules_passed    = sum(1 for r in res.get("audit",[]) if r.get("satisfies")),
+                            rules_total     = len(res.get("audit",[])),
+                            iterations_used = res.get("iterations_used", 1),
+                        )
+                        st.download_button(
+                            "⬇ Download as PDF",
+                            data      = _pdf_bytes,
+                            file_name = f"verified_draft_{res.get('run_id','output')}.pdf",
+                            mime      = "application/pdf",
+                            key       = "dl_draft_pdf",
+                            use_container_width = True,
+                        )
+                    except Exception as _pdf_err:
+                        st.button(
+                            "⬇ PDF unavailable",
+                            disabled = True,
+                            key      = "dl_draft_pdf_disabled",
+                            help     = f"PDF generation failed: {_pdf_err}",
+                            use_container_width = True,
+                        )
             else:
                 st.info("No draft available.")
 
