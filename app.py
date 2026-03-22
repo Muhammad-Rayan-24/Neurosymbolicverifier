@@ -754,7 +754,7 @@ with col_right:
         while (attempt < MAX_ITER) and not passed:
             attempt += 1
             iter_label = f"Iteration {attempt}/{MAX_ITER}"
-            prog.progress(45 + attempt * 8, text=f"✍️ {iter_label} — generating…")
+            prog.progress(min(99, 45 + attempt * 8), text=f"✍️ {iter_label} -- generating...")
 
             # ── Generate draft (skip if audit-only) ───────────────────────────
             if not audit_only:
@@ -802,7 +802,7 @@ with col_right:
 
             # ── Audit ─────────────────────────────────────────────────────────
             if structured_rules and draft_text:
-                prog.progress(55 + attempt * 6, text=f"🔍 {iter_label} — auditing…")
+                prog.progress(min(99, 55 + attempt * 6), text=f"🔍 {iter_label} -- auditing...")
                 status.info(f"M2 auditing {len(structured_rules)} rule(s)…")
                 try:
                     audit_results = m2.structured_audit(draft_text, structured_rules, api_key)
