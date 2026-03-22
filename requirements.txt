@@ -1,0 +1,29 @@
+# ============================================================
+# NeuroSymbolic Verifier v3 — Requirements
+# ============================================================
+# Generation + parsing + routing: Anthropic Claude
+# Embeddings: sentence-transformers (free, local, no API key)
+# Vector DB: Qdrant (in-memory or cloud)
+# UI: Streamlit
+# ============================================================
+
+# ── UI ────────────────────────────────────────────────────────
+streamlit>=1.35.0
+
+# ── Anthropic Claude (all LLM calls) ─────────────────────────
+anthropic>=0.25.0
+
+# ── Vector DB ────────────────────────────────────────────────
+qdrant-client>=1.9.0
+
+# ── Free local embeddings (no API key needed) ────────────────
+sentence-transformers>=2.7.0
+
+# ── Wikipedia research source ────────────────────────────────
+wikipedia>=1.4.0
+
+# ── .env support ─────────────────────────────────────────────
+python-dotenv>=1.0.0
+
+# ── PDF export ───────────────────────────────────────────────────────
+fpdf2>=2.7.0
