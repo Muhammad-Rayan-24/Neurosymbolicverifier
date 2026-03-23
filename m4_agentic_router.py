@@ -18,6 +18,23 @@ _FAILED_CONTEXTS = frozenset([
     'DuckDuckGo returned no usable content.',
 ])
 
+# ── URL categories that cannot be scraped for text content ────────────────────
+# Video platforms: JS-rendered players, no transcript in plain HTML.
+# Pasting a YouTube/Vimeo link will return garbage HTML — detect and reject
+# with a clear, actionable message instead of hallucinating an answer.
+_VIDEO_DOMAINS = frozenset([
+    "youtube.com", "youtu.be", "vimeo.com", "dailymotion.com",
+    "twitch.tv", "tiktok.com", "rumble.com", "odysee.com",
+    "bilibili.com", "nicovideo.jp", "streamable.com",
+])
+# JS-only / login-walled domains that always return unusable HTML
+_JS_ONLY_DOMAINS = frozenset([
+    "twitter.com", "x.com", "instagram.com", "facebook.com",
+    "linkedin.com", "threads.net", "discord.com", "slack.com",
+    "notion.so", "figma.com", "canva.com", "docs.google.com",
+    "sheets.google.com", "drive.google.com",
+])
+
 
 def _call_llm(prompt, api_key, llm_config=None, max_tokens=256):
     cfg      = llm_config or {'provider':'anthropic','model':'claude-sonnet-4-6','api_key':api_key}
@@ -231,6 +248,30 @@ def _ddg_fetch(search_query):
 
 def _url_fetch(url, original_query, api_key=None, llm_config=None):
     '''Fetch a custom URL (HTML page or online PDF) and extract text.'''
+    # ── Block video platforms early — they're JS-rendered, no text content ──
+    try:
+        _parsed_host = urllib.parse.urlparse(url).netloc.lower().lstrip("www.")
+    except Exception:
+        _parsed_host = ""
+
+    if any(_parsed_host == d or _parsed_host.endswith("." + d)
+           for d in _VIDEO_DOMAINS):
+        return _failed(
+            f"VIDEO URL BLOCKED: '{url}' is a video platform. "
+            f"Video pages contain no extractable text — the system cannot "
+            f"watch or transcribe videos. To use this content: paste the "
+            f"video transcript or description directly into the Reference "
+            f"Document field instead."
+        )
+
+    if any(_parsed_host == d or _parsed_host.endswith("." + d)
+           for d in _JS_ONLY_DOMAINS):
+        return _failed(
+            f"JS-ONLY URL BLOCKED: '{url}' requires JavaScript or login "
+            f"to render content and cannot be scraped. Copy-paste the "
+            f"relevant text directly into the Reference Document field."
+        )
+
     try:
         req = urllib.request.Request(
             url,
