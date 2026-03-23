@@ -73,7 +73,7 @@ _PARSE_SCHEMA = """{
 }"""
 
 
-def parse_rule_to_constraint(rule_text: str, api_key: str) -> dict:
+def parse_rule_to_constraint(rule_text: str, api_key: str, llm_config: dict = None) -> dict:
     """Parse a single NL rule into a structured constraint dict. Cached."""
     cache_key = hashlib.md5(rule_text.strip().encode()).hexdigest()
     if cache_key in _PARSE_CACHE:
@@ -93,7 +93,7 @@ Key: if the rule contains words like 'currently', 'is reading', 'now shows', 'at
 it is an 'observation' with scope 'context_only', NOT a constraint enforced everywhere."""
 
     try:
-        raw    = _claude(api_key, prompt, max_tokens=512)
+        raw    = _call_llm(prompt, (llm_config or {"provider":"anthropic","model":"claude-sonnet-4-5","api_key":api_key}), max_tokens=512)
         clean  = raw.strip().replace("```json", "").replace("```", "").strip()
         result = json.loads(clean)
         _PARSE_CACHE[cache_key] = result
@@ -113,7 +113,7 @@ it is an 'observation' with scope 'context_only', NOT a constraint enforced ever
         return fallback
 
 
-def parse_rules_parallel(rule_texts: list, api_key: str) -> list:
+def parse_rules_parallel(rule_texts: list, api_key: str, llm_config: dict = None) -> list:
     """Parse ALL rules concurrently. N rules in ~time-of-1 rule."""
     if not rule_texts:
         return []
@@ -128,7 +128,7 @@ def parse_rules_parallel(rule_texts: list, api_key: str) -> list:
         return results
     t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(uncached))) as pool:
-        futures = {pool.submit(parse_rule_to_constraint, rule, api_key): idx
+        futures = {pool.submit(parse_rule_to_constraint, rule, api_key, llm_config): idx
                    for idx, rule in uncached}
         for future in as_completed(futures):
             results[futures[future]] = future.result()
@@ -158,7 +158,7 @@ def _build_scope_instruction(rule: dict) -> str:
 
 # ── Batched audit (v3: graded compliance_score) ───────────────────────────────
 
-def structured_audit(draft_text: str, structured_rules: list, api_key: str) -> list:
+def structured_audit(draft_text: str, structured_rules: list, api_key: str, llm_config: dict = None) -> list:
     """
     Audit ALL rules in batched Claude calls.
     v3: returns compliance_score [0,1] per rule, not binary pass/fail.
@@ -168,11 +168,11 @@ def structured_audit(draft_text: str, structured_rules: list, api_key: str) -> l
     all_results = []
     for start in range(0, len(structured_rules), _AUDIT_BATCH):
         chunk = structured_rules[start:start + _AUDIT_BATCH]
-        all_results.extend(_batch_audit_chunk(draft_text, chunk, start, api_key))
+        all_results.extend(_batch_audit_chunk(draft_text, chunk, start, api_key, llm_config))
     return all_results
 
 
-def _batch_audit_chunk(draft_text: str, rules: list, offset: int, api_key: str) -> list:
+def _batch_audit_chunk(draft_text: str, rules: list, offset: int, api_key: str, llm_config: dict = None) -> list:
     """One batched audit prompt. Returns graded results."""
     rules_block = ""
     for i, rule in enumerate(rules):
@@ -235,7 +235,7 @@ Rules:
 
     try:
         t0  = time.perf_counter()
-        raw = _claude(api_key, prompt, max_tokens=4096)
+        raw = _call_llm(prompt, (llm_config or {"provider":"anthropic","model":"claude-sonnet-4-5","api_key":api_key}), max_tokens=4096)
         print(f"   [M2] Batch audit {len(rules)} rule(s) in {time.perf_counter()-t0:.2f}s")
         clean    = raw.strip().replace("```json", "").replace("```", "").strip()
         llm_list = json.loads(clean)
@@ -244,21 +244,21 @@ Rules:
                 for i, rule in enumerate(rules)]
     except Exception as e:
         print(f"   [M2] Batch audit failed ({e}), falling back to parallel calls.")
-        return _parallel_audit_fallback(draft_text, rules, offset, api_key)
+        return _parallel_audit_fallback(draft_text, rules, offset, api_key, llm_config)
 
 
 def _parallel_audit_fallback(draft_text: str, rules: list,
-                              offset: int, api_key: str) -> list:
+                              offset: int, api_key: str, llm_config: dict = None) -> list:
     results = [None] * len(rules)
     with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(rules))) as pool:
-        futures = {pool.submit(_single_audit, draft_text, rule, offset + i, api_key): i
+        futures = {pool.submit(_single_audit, draft_text, rule, offset + i, api_key, llm_config): i
                    for i, rule in enumerate(rules)}
         for future in as_completed(futures):
             results[futures[future]] = future.result()
     return results
 
 
-def _single_audit(draft_text: str, rule: dict, idx: int, api_key: str) -> dict:
+def _single_audit(draft_text: str, rule: dict, idx: int, api_key: str, llm_config: dict = None) -> dict:
     """Single-rule audit fallback with graded scoring."""
     unit = rule.get("unit", "").strip() or "same unit as threshold"
     prompt = f"""You are a strict constraint auditor.
@@ -283,7 +283,7 @@ Return ONLY raw JSON with graded compliance_score [0.0-1.0]:
   "explanation": "<one sentence>"
 }}"""
     try:
-        raw     = _claude(api_key, prompt, max_tokens=512)
+        raw     = _call_llm(prompt, (llm_config or {"provider":"anthropic","model":"claude-sonnet-4-5","api_key":api_key}), max_tokens=512)
         clean   = raw.strip().replace("```json", "").replace("```", "").strip()
         llm_res = json.loads(clean)
     except Exception:
