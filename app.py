@@ -584,11 +584,82 @@ with col_left:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Existing Draft ────────────────────────────────────────────────────────
-    st.markdown('<div class="section-label">📄 Existing Draft (optional — audit only)</div>', unsafe_allow_html=True)
-    existing_draft = st.text_area("draft", label_visibility="collapsed",
-                                   placeholder="Paste an existing draft to audit without generating.",
-                                   height=90, key="existing_draft")
+    # ── Reference Document / Existing Draft ─────────────────────────────────
+    st.markdown('<div class="section-label">📄 Reference Document (optional)</div>', unsafe_allow_html=True)
+
+    _doc_tab_paste, _doc_tab_upload = st.tabs(["✏️ Paste text", "📎 Upload file"])
+
+    with _doc_tab_paste:
+        _pasted = st.text_area("draft", label_visibility="collapsed",
+                               placeholder="Paste an existing draft or reference document here.\n"
+                                           "Used as context for generation, or audited directly.",
+                               height=90, key="existing_draft")
+
+    with _doc_tab_upload:
+        _uploaded_file = st.file_uploader(
+            "Upload a document",
+            label_visibility="collapsed",
+            type=["txt", "pdf", "docx", "md", "csv"],
+            key="doc_upload",
+            help="Supported: TXT, PDF, DOCX, MD, CSV. Max 50 MB."
+        )
+        _extracted_text = ""
+        if _uploaded_file is not None:
+            try:
+                _fname = _uploaded_file.name.lower()
+                if _fname.endswith(".txt") or _fname.endswith(".md"):
+                    _extracted_text = _uploaded_file.read().decode("utf-8", errors="replace")
+
+                elif _fname.endswith(".csv"):
+                    import csv, io
+                    _csv_reader = csv.reader(io.StringIO(_uploaded_file.read().decode("utf-8", errors="replace")))
+                    _extracted_text = "\n".join(", ".join(row) for row in _csv_reader)
+
+                elif _fname.endswith(".pdf"):
+                    try:
+                        import pypdf
+                        _pdf_reader = pypdf.PdfReader(io.BytesIO(_uploaded_file.read()))
+                        _extracted_text = "\n\n".join(
+                            page.extract_text() or "" for page in _pdf_reader.pages
+                        ).strip()
+                    except ImportError:
+                        try:
+                            import pdfplumber
+                            with pdfplumber.open(io.BytesIO(_uploaded_file.read())) as _plumb:
+                                _extracted_text = "\n\n".join(
+                                    p.extract_text() or "" for p in _plumb.pages
+                                ).strip()
+                        except ImportError:
+                            st.warning("PDF support requires pypdf. Run: pip install pypdf")
+
+                elif _fname.endswith(".docx"):
+                    try:
+                        import docx as _docx_lib
+                        import io
+                        _doc = _docx_lib.Document(io.BytesIO(_uploaded_file.read()))
+                        _extracted_text = "\n".join(
+                            para.text for para in _doc.paragraphs if para.text.strip()
+                        )
+                    except ImportError:
+                        st.warning("DOCX support requires python-docx. Run: pip install python-docx")
+
+                if _extracted_text:
+                    _preview = _extracted_text[:300].replace("<","&lt;")
+                    st.markdown(
+                        f'<div style="background:rgba(109,206,168,0.06);border:1px solid rgba(109,206,168,0.2);"'
+                        f'border-radius:10px;padding:0.7rem 1rem;font-size:0.78rem;color:rgba(232,228,220,0.65);"'
+                        f'font-family:DM Mono,monospace;max-height:80px;overflow:hidden;">'
+                        f'✅ <strong>{_uploaded_file.name}</strong> — {len(_extracted_text):,} chars extracted<br>'
+                        f'<span style="opacity:0.5">{_preview}{"…" if len(_extracted_text)>300 else ""}</span></div>',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.warning("Could not extract text from this file.")
+            except Exception as _upload_err:
+                st.error(f"File read error: {_upload_err}")
+
+    # Merge: uploaded file takes priority over pasted text if both present
+    existing_draft = _extracted_text.strip() if _extracted_text.strip() else _pasted.strip()
 
     st.markdown("<br>", unsafe_allow_html=True)
 
