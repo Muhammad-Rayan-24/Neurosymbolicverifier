@@ -85,7 +85,7 @@ def _call_llm(prompt: str, llm_config: dict = None, max_tokens: int = 4096) -> s
         if ck not in _CLIENT_CACHE:
             _CLIENT_CACHE[ck] = _oai.OpenAI(api_key=api_key)
         client = _CLIENT_CACHE[ck]
-        if model in _O_SERIES:
+        if model in _O_SERIES or model.startswith("gpt-5"):  # gpt-5.x also needs max_completion_tokens
             # Reasoning models: no temperature, use max_completion_tokens
             resp = client.chat.completions.create(
                 model=model,
@@ -226,8 +226,9 @@ def _build_scope_instruction(rule: dict) -> str:
 
 def structured_audit(draft_text: str, structured_rules: list, api_key: str, llm_config: dict = None) -> list:
     """
-    Audit ALL rules in batched Claude calls.
-    v3: returns compliance_score [0,1] per rule, not binary pass/fail.
+    Audit ALL rules in batched LLM calls (provider-agnostic).
+    v4: uses llm_config to route to Anthropic / OpenAI / Google.
+    Returns compliance_score [0,1] per rule, not binary pass/fail.
     """
     if not structured_rules:
         return []
@@ -240,6 +241,15 @@ def structured_audit(draft_text: str, structured_rules: list, api_key: str, llm_
 
 def _batch_audit_chunk(draft_text: str, rules: list, offset: int, api_key: str, llm_config: dict = None) -> list:
     """One batched audit prompt. Returns graded results."""
+    # Defensive: if no llm_config, auto-detect provider from key prefix
+    if llm_config is None:
+        _key = (api_key or "").strip()
+        if _key.startswith("sk-") and not _key.startswith("sk-ant-"):
+            llm_config = {"provider":"openai","model":"gpt-4.1","api_key":_key}
+        elif _key.startswith("AIza"):
+            llm_config = {"provider":"google","model":"gemini-2.5-flash","api_key":_key}
+        else:
+            llm_config = {"provider":"anthropic","model":"claude-sonnet-4-6","api_key":_key}
     rules_block = ""
     for i, rule in enumerate(rules):
         idx  = offset + i
@@ -309,7 +319,9 @@ Rules:
         return [_build_result(offset + i, rule, by_index.get(offset + i))
                 for i, rule in enumerate(rules)]
     except Exception as e:
-        print(f"   [M2] Batch audit failed ({e}), falling back to parallel calls.")
+        _prov = (llm_config or {}).get("provider","anthropic")
+        _mod  = (llm_config or {}).get("model","unknown")
+        print(f"   [M2] Batch audit failed ({_prov}/{_mod}): {e} -- falling back.")
         return _parallel_audit_fallback(draft_text, rules, offset, api_key, llm_config)
 
 
@@ -326,6 +338,15 @@ def _parallel_audit_fallback(draft_text: str, rules: list,
 
 def _single_audit(draft_text: str, rule: dict, idx: int, api_key: str, llm_config: dict = None) -> dict:
     """Single-rule audit fallback with graded scoring."""
+    # Defensive: auto-detect provider from key if llm_config missing
+    if llm_config is None:
+        _key = (api_key or "").strip()
+        if _key.startswith("sk-") and not _key.startswith("sk-ant-"):
+            llm_config = {"provider":"openai","model":"gpt-4.1","api_key":_key}
+        elif _key.startswith("AIza"):
+            llm_config = {"provider":"google","model":"gemini-2.5-flash","api_key":_key}
+        else:
+            llm_config = {"provider":"anthropic","model":"claude-sonnet-4-6","api_key":_key}
     unit = rule.get("unit", "").strip() or "same unit as threshold"
     prompt = f"""You are a strict constraint auditor.
 
@@ -352,13 +373,13 @@ Return ONLY raw JSON with graded compliance_score [0.0-1.0]:
         raw     = _call_llm(prompt, (llm_config or {"provider":"anthropic","model":"claude-sonnet-4-6","api_key":api_key}), max_tokens=512)
         clean   = raw.strip().replace("```json", "").replace("```", "").strip()
         llm_res = json.loads(clean)
-    except Exception:
+    except Exception as _audit_err:
         llm_res = {
             "extracted_value_raw": "EXTRACTION FAILED",
             "extracted_value_num": None,
             "compliance_score": 0.0,
             "satisfies": False,
-            "explanation": "Claude extraction failed — treating as violation.",
+            "explanation": f"Audit extraction failed ({(llm_config or {}).get('provider','unknown')}/{(llm_config or {}).get('model','unknown')}): {str(locals().get('_audit_err','error'))[:120]}",
         }
     return _build_result(idx, rule, llm_res)
 
