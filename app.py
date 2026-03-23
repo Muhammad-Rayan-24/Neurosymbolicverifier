@@ -111,6 +111,7 @@ def _draft_to_pdf(draft_text: str, run_id: str = "", ltn_score: float = None,
         if line.startswith("# ") and not line.startswith("## "):
             pdf.ln(4)
             pdf.set_font("Helvetica", "B", 16); set_c(C_H1)
+            pdf.set_x(pdf.l_margin)
             pdf.multi_cell(cw, 8, safe(line[2:].strip()), align="L")
             pdf.set_draw_color(*C_H2); pdf.set_line_width(0.5)
             pdf.line(pdf.l_margin, pdf.get_y(), pdf.w - pdf.r_margin, pdf.get_y())
@@ -120,6 +121,7 @@ def _draft_to_pdf(draft_text: str, run_id: str = "", ltn_score: float = None,
         if line.startswith("## ") and not line.startswith("### "):
             pdf.ln(3)
             pdf.set_font("Helvetica", "B", 13); set_c(C_H2)
+            pdf.set_x(pdf.l_margin)
             pdf.multi_cell(cw, 7, safe(line[3:].strip()), align="L")
             pdf.ln(1); continue
 
@@ -127,6 +129,7 @@ def _draft_to_pdf(draft_text: str, run_id: str = "", ltn_score: float = None,
         if line.startswith("### "):
             pdf.ln(2)
             pdf.set_font("Helvetica", "B", 11); set_c(C_H3)
+            pdf.set_x(pdf.l_margin)
             pdf.multi_cell(cw, 6, safe(line[4:].strip()), align="L")
             pdf.ln(1); continue
 
@@ -157,6 +160,7 @@ def _draft_to_pdf(draft_text: str, run_id: str = "", ltn_score: float = None,
         if _r.match(r'^[a-z_][a-z_0-9]*\s*:', line):
             pdf.set_font("Courier", "", 9); set_c(C_CODE)
             pdf.set_fill_color(245, 250, 245)
+            pdf.set_x(pdf.l_margin)
             pdf.multi_cell(cw, 5, sanitize(line), align="L", fill=True)
             continue
 
@@ -173,6 +177,7 @@ def _draft_to_pdf(draft_text: str, run_id: str = "", ltn_score: float = None,
         # Regular body
         text = safe(line)
         pdf.set_font("Helvetica", "", 10); set_c(C_BODY)
+        pdf.set_x(pdf.l_margin)
         pdf.multi_cell(cw, 5, text, align="L")
 
     return bytes(pdf.output())
@@ -886,7 +891,8 @@ with col_right:
                 )
 
                 try:
-                    status.info(f"⚡ {iter_label} — streaming draft with Claude…")
+                    _model_display = llm_config.get("model", "model")
+                    status.info(f"⚡ {iter_label} — generating with {_model_display}…")
                     stream_box = st.empty()
                     collected  = []
 
@@ -908,11 +914,22 @@ with col_right:
                     elif llm_config.get("provider") == "openai":
                         import openai as _oai
                         _oai_client = _oai.OpenAI(api_key=api_key)
-                        stream = _oai_client.chat.completions.create(
-                            model=llm_config["model"], max_tokens=16000,
-                            stream=True,
-                            messages=[{"role":"user","content":gen_prompt}]
+                        _oai_model  = llm_config["model"]
+                        # o-series and gpt-5.x use max_completion_tokens, not max_tokens
+                        _uses_completion_tokens = (
+                            _oai_model in {"o3","o3-pro","o3-mini","o4-mini","o1","o1-mini","o1-pro"}
+                            or _oai_model.startswith("gpt-5")
                         )
+                        _oai_kwargs = {
+                            "model"   : _oai_model,
+                            "stream"  : True,
+                            "messages": [{"role":"user","content":gen_prompt}],
+                        }
+                        if _uses_completion_tokens:
+                            _oai_kwargs["max_completion_tokens"] = 16000
+                        else:
+                            _oai_kwargs["max_tokens"] = 16000
+                        stream = _oai_client.chat.completions.create(**_oai_kwargs)
                         for chunk in stream:
                             delta = chunk.choices[0].delta.content
                             if delta:
@@ -924,7 +941,7 @@ with col_right:
                                     unsafe_allow_html=True)
 
                     else:  # Google Gemini — no streaming SDK, single call
-                        stream_box.info("Generating with Gemini...")
+                        stream_box.info(f"Generating with {llm_config.get('model','Gemini')}...")
                         result = m2._call_llm(gen_prompt, llm_config, max_tokens=16000)
                         collected = [result]
                         safe = result.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
@@ -936,7 +953,7 @@ with col_right:
                     stream_box.empty()
                     status.empty()
                     if not draft_text.strip():
-                        st.error("Claude returned an empty response."); st.stop()
+                        st.error(f"{llm_config.get('model','LLM')} returned an empty response. Check your API key and model access."); st.stop()
                 except Exception as e:
                     st.error(f"Draft generation failed: {e}"); st.stop()
 
@@ -1131,6 +1148,7 @@ with col_right:
                             rules_passed    = sum(1 for r in res.get("audit",[]) if r.get("satisfies")),
                             rules_total     = len(res.get("audit",[])),
                             iterations_used = res.get("iterations_used", 1),
+                            llm_label       = f"{res.get('llm_provider_name','Claude')} / {res.get('llm_model','')}",
                         )
                         st.download_button(
                             "⬇ Download as PDF",
