@@ -441,13 +441,26 @@ with col_left:
     # ── LLM Provider + Model + API Key ───────────────────────────────────────
     st.markdown('<div class="section-label">🤖 LLM Provider</div>', unsafe_allow_html=True)
 
+    # ── Thinking models: need special API handling ───────────────────────────
+    # Claude: extended thinking via betas header + thinking block in messages
+    # OpenAI o-series: reasoning models — use same API, no system prompt, no temp
+    # Gemini 3.x: thinking built-in, no extra params needed
+    _THINKING_MODELS = {
+        # Claude extended thinking
+        "claude-opus-4-6", "claude-sonnet-4-6",
+        # OpenAI reasoning (o-series)
+        "o3", "o3-pro", "o4-mini",
+    }
+
     _PROVIDERS = {
         "Anthropic (Claude)": {
             "id": "anthropic",
             "models": [
-                "claude-sonnet-4-5",
-                "claude-opus-4-5",
-                "claude-haiku-4-5-20251001",
+                "claude-opus-4-6",          # Latest flagship (Feb 2026) — extended thinking
+                "claude-sonnet-4-6",         # Latest balanced (Feb 2026) — extended thinking
+                "claude-sonnet-4-5",         # Previous balanced
+                "claude-opus-4-5",           # Previous flagship
+                "claude-haiku-4-5-20251001", # Fast / low cost
             ],
             "key_hint" : "sk-ant-…",
             "env_key"  : "ANTHROPIC_API_KEY",
@@ -456,10 +469,13 @@ with col_left:
         "OpenAI (GPT)": {
             "id": "openai",
             "models": [
-                "gpt-4o",
-                "gpt-4o-mini",
-                "gpt-4.1",
-                "gpt-4.1-mini",
+                "gpt-5.4",       # Latest flagship (2026)
+                "gpt-5.4-mini",  # Fast / efficient
+                "gpt-4.1",       # Strong coding + 1M context
+                "gpt-4.1-mini",  # Cost-efficient
+                "o3",            # Reasoning model (thinking)
+                "o3-pro",        # Reasoning — max compute (thinking)
+                "o4-mini",       # Reasoning — efficient (thinking)
             ],
             "key_hint" : "sk-…",
             "env_key"  : "OPENAI_API_KEY",
@@ -468,10 +484,11 @@ with col_left:
         "Google (Gemini)": {
             "id": "google",
             "models": [
-                "gemini-2.5-flash",
-                "gemini-2.5-pro",
-                "gemini-2.0-flash",
-                "gemini-1.5-pro",
+                "gemini-3.1-pro-preview",    # Latest flagship (Feb 2026)
+                "gemini-3.1-flash-preview",  # Latest balanced (2026)
+                "gemini-3.1-flash-lite",     # Cost-efficient (2026)
+                "gemini-2.5-pro",            # Stable premium
+                "gemini-2.5-flash",          # Stable balanced
             ],
             "key_hint" : "AIza…",
             "env_key"  : "GOOGLE_API_KEY",
@@ -489,6 +506,12 @@ with col_left:
         "model_select", label_visibility="collapsed",
         options=_prov["models"], key=f"model_select_{_prov['id']}",
     )
+    if _model_choice in _THINKING_MODELS:
+        st.markdown(
+            '<p style="font-size:0.7rem;color:rgba(200,169,110,0.8);margin-top:-0.3rem;">'
+            '🧠 Thinking / reasoning model selected — extended reasoning enabled</p>',
+            unsafe_allow_html=True
+        )
 
     _hint = "Auto-loaded ✓" if _prov["resolved"] else _prov["key_hint"]
     api_input = st.text_input(
@@ -502,7 +525,12 @@ with col_left:
         st.markdown('<p style="font-size:0.7rem;color:rgba(232,115,109,0.7);margin-top:-0.25rem;">⚠ No key found — paste above</p>', unsafe_allow_html=True)
 
     # Build the llm_config dict passed through the entire pipeline
-    llm_config = {"provider": _prov["id"], "model": _model_choice, "api_key": api_key or ""}
+    llm_config = {
+        "provider"  : _prov["id"],
+        "model"     : _model_choice,
+        "api_key"   : api_key or "",
+        "thinking"  : _model_choice in _THINKING_MODELS,
+    }
 
     # ── Qdrant Config ─────────────────────────────────────────────────────────
     with st.expander("🧠 Qdrant Config (optional — defaults to in-memory)", expanded=False):
