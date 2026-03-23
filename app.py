@@ -319,6 +319,16 @@ for _k, _v in [("rules", []), ("results", None), ("input_counter", 0),
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
+# If the app crashed mid-run, _pipeline_running stays True and blocks
+# the Run button forever. Clear it on every fresh page load if results
+# are already stored (meaning the run actually completed before crash).
+if st.session_state.get("_pipeline_running", False):
+    if st.session_state.results is not None:
+        # Run completed — flag just didn't clear
+        st.session_state["_pipeline_running"] = False
+    # If results is None + flag is True = genuinely mid-run or hard crash
+    # The Reset button will clear this manually
+
 _app_dir = os.path.dirname(os.path.abspath(__file__))
 if _app_dir not in sys.path:
     sys.path.insert(0, _app_dir)
@@ -616,7 +626,27 @@ with col_left:
         st.markdown('<div style="text-align:center;color:rgba(232,228,220,0.2);font-size:0.78rem;padding:0.9rem;border:1px dashed rgba(255,255,255,0.06);border-radius:10px;margin-top:0.4rem;">No rules yet — type above and click Add</div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    run_btn = st.button("⚡ Run Pipeline", key="run_pipeline_btn")
+    _run_col, _rst_col = st.columns([3, 1])
+    with _run_col:
+        run_btn = st.button("⚡ Run Pipeline", key="run_pipeline_btn",
+                            use_container_width=True)
+    with _rst_col:
+        _hard_reset = st.button("🔄 Reset", key="hard_reset_btn",
+                                use_container_width=True,
+                                help="Clear all results and pipeline state. Use if the run gets stuck or after an API error.")
+    if _hard_reset:
+        # Wipe everything — results, running flag, any stuck state
+        _keys_to_clear = [
+            "results", "brain_records", "_pipeline_running",
+        ]
+        for _k in _keys_to_clear:
+            if _k in st.session_state:
+                del st.session_state[_k]
+        st.session_state.results       = None
+        st.session_state.brain_records = {}
+        st.session_state["_pipeline_running"] = False
+        st.success("✅ Reset complete — ready for a new run.", icon="🔄")
+        st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1866,7 +1896,12 @@ with col_right:
                               use_container_width=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("🔄 Reset", key="reset_results"):
-            st.session_state.results      = None
+        if st.button("🔄 Start New Run", key="reset_results",
+                    use_container_width=True):
+            for _k in ["results","brain_records","_pipeline_running"]:
+                if _k in st.session_state:
+                    del st.session_state[_k]
+            st.session_state.results       = None
             st.session_state.brain_records = {}
+            st.session_state["_pipeline_running"] = False
             st.rerun()
