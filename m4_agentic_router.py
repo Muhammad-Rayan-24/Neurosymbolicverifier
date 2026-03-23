@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 _TOPIC_CACHE  : dict = {}
 _CLIENT_CACHE : dict = {}
+_O_SERIES = {"o3","o3-pro","o3-mini","o4-mini","o1","o1-mini","o1-pro"}
 
 
 def _call_llm(prompt: str, api_key: str, llm_config: dict = None,
@@ -45,9 +46,15 @@ def _call_llm(prompt: str, api_key: str, llm_config: dict = None,
         import openai as _oai
         if cache_k not in _CLIENT_CACHE:
             _CLIENT_CACHE[cache_k] = _oai.OpenAI(api_key=key)
-        r = _CLIENT_CACHE[cache_k].chat.completions.create(
-            model=model, max_tokens=max_tokens,
-            messages=[{"role":"user","content":prompt}])
+        client = _CLIENT_CACHE[cache_k]
+        if model in _O_SERIES:
+            r = client.chat.completions.create(
+                model=model, max_completion_tokens=max_tokens,
+                messages=[{"role":"user","content":prompt}])
+        else:
+            r = client.chat.completions.create(
+                model=model, max_tokens=max_tokens,
+                messages=[{"role":"user","content":prompt}])
         return r.choices[0].message.content
 
     elif provider == "google":
