@@ -484,9 +484,10 @@ with col_left:
         "Google (Gemini)": {
             "id": "google",
             "models": [
-                "gemini-3.1-pro-preview",    # Latest flagship (Feb 2026)
-                "gemini-3.1-flash-preview",  # Latest balanced (2026)
-                "gemini-3.1-flash-lite",     # Cost-efficient (2026)
+                "gemini-3-flash",            # Gemini 3 Flash (Mar 2026) — fastest 3-series
+                "gemini-3.1-pro-preview",    # Gemini 3.1 Pro (Feb 2026) — flagship
+                "gemini-3.1-flash-preview",  # Gemini 3.1 Flash — balanced
+                "gemini-3.1-flash-lite",     # Gemini 3.1 Flash-Lite — cost-efficient
                 "gemini-2.5-pro",            # Stable premium
                 "gemini-2.5-flash",          # Stable balanced
             ],
