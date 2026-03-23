@@ -15,6 +15,15 @@ from datetime import datetime
 #    for Second Brain visualisation.
 # ============================================================
 
+# ── Qdrant Cloud credentials ──────────────────────────────────────────────────
+# Edit these two lines to point at your Qdrant instance.
+# Leave QDRANT_URL as "" to use fast in-memory Qdrant (no persistence).
+# When QDRANT_URL is set all runs are persisted in the cloud cluster and
+# every record is tagged with a run_id so queries never bleed across runs.
+QDRANT_URL     = "https://d217835b-8105-4b9b-a47d-439ff47e0a44.sa-east-1-0.aws.cloud.qdrant.io"
+QDRANT_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.ZeQ9egz-8PwY5US-q_mAxhw1dEEwPWzEhFyg5KaDLuM"
+# ─────────────────────────────────────────────────────────────────────────────
+
 try:
     from qdrant_client import QdrantClient
     from qdrant_client.models import (
@@ -63,23 +72,45 @@ def _batch_embed(texts: list) -> list:
 def _get_client(url: str = None, api_key: str = None) -> "QdrantClient":
     global _CLIENT
     if _CLIENT is None:
-        if url:
-            _CLIENT = QdrantClient(url=url, api_key=api_key or None)
-            print(f"[M3] Connected to Qdrant at {url}")
+        # Fall back to module-level constants if no args provided
+        _url = url or QDRANT_URL or ""
+        _key = api_key or QDRANT_API_KEY or ""
+        if _url:
+            _CLIENT = QdrantClient(url=_url, api_key=_key or None)
+            print(f"[M3] Connected to Qdrant at {_url}")
         else:
             _CLIENT = QdrantClient(":memory:")
             print("[M3] Using in-memory Qdrant")
     return _CLIENT
 
 
+def reset_client():
+    """
+    Tear down the cached Qdrant client so the next setup_memory() call
+    creates a fresh connection.  Called on every pipeline reset so that
+    in-memory Qdrant is completely wiped and cloud Qdrant gets a fresh
+    connection object — preventing stale data from a previous run from
+    leaking into the next run's retrieve_context() call.
+    """
+    global _CLIENT
+    _CLIENT = None
+    print("[M3] Qdrant client reset — fresh connection on next call.")
+
+
 def setup_memory(url: str = None, qdrant_api_key: str = None, **kwargs):
     """
     Initialise Qdrant collections. Returns the client.
+    If url/qdrant_api_key are not provided, falls back to the module-level
+    QDRANT_URL / QDRANT_API_KEY constants defined at the top of this file.
     kwargs absorbed for API compatibility (old code passed openai_api_key).
     """
     if not QDRANT_AVAILABLE:
         raise ImportError("qdrant-client not installed. Run: pip install qdrant-client")
-    client   = _get_client(url=url, api_key=qdrant_api_key)
+    # Use module constants as defaults so cloud Qdrant is always used when
+    # the UI fields are left blank
+    _url = url or QDRANT_URL or ""
+    _key = qdrant_api_key or QDRANT_API_KEY or ""
+    client   = _get_client(url=_url or None, api_key=_key or None)
     existing = {c.name for c in client.get_collections().collections}
     for name in _COLLECTIONS:
         if name not in existing:
@@ -93,7 +124,7 @@ def setup_memory(url: str = None, qdrant_api_key: str = None, **kwargs):
 
 # ── Store functions ───────────────────────────────────────────────────────────
 
-def store_all_rules(client, structured_rules: list, **kwargs) -> list:
+def store_all_rules(client, structured_rules: list, run_id: str = "", **kwargs) -> list:
     """Batch-embed and store all rules. Returns list of point IDs."""
     if not structured_rules:
         return []
@@ -119,16 +150,17 @@ def store_all_rules(client, structured_rules: list, **kwargs) -> list:
                 "scope"           : rule.get("scope", "always"),
                 "rule_nature"     : rule.get("rule_nature", "constraint"),
                 "source_name"     : rule.get("source_name", ""),
+                "run_id"          : run_id,
                 "stored_at"       : ts,
                 "record_type"     : "rule",
             }
         ))
     client.upsert(collection_name="rules", points=points)
-    print(f"   [M3] Stored {len(points)} rule(s) in Qdrant.")
+    print(f"   [M3] Stored {len(points)} rule(s) in Qdrant (run={run_id}).")
     return ids
 
 
-def store_source(client, source: dict, **kwargs) -> str:
+def store_source(client, source: dict, run_id: str = "", **kwargs) -> str:
     text = source.get("context", "")[:512]
     pid  = str(uuid.uuid4())
     vec  = _embed(text)
@@ -139,6 +171,7 @@ def store_source(client, source: dict, **kwargs) -> str:
             "title"       : source.get("title", ""),
             "reference"   : source.get("reference", ""),
             "source_name" : source.get("source_name", ""),
+            "run_id"      : run_id,
             "stored_at"   : datetime.utcnow().isoformat(),
             "record_type" : "source",
         }
@@ -177,20 +210,44 @@ def store_audit_result(client, audit_result: dict, run_id: str = "", **kwargs) -
 
 # ── Retrieve functions ────────────────────────────────────────────────────────
 
-def retrieve_context(client, query_text: str, n_results: int = 4, **kwargs) -> list:
-    """Semantic search across rules and sources."""
+def retrieve_context(client, query_text: str, n_results: int = 4,
+                     run_id: str = "", **kwargs) -> list:
+    """
+    Semantic search across rules and sources for the CURRENT run only.
+
+    run_id is mandatory for isolation — when provided, only records tagged
+    with that run_id are searched.  This prevents context from a previous
+    run leaking into the current generation prompt (the cross-query
+    contamination bug).  When run_id is empty the filter is skipped and
+    all records are searched (legacy / test behaviour).
+    """
     try:
-        vec   = _embed(query_text)
+        vec = _embed(query_text)
         texts = []
+
+        # Build a run_id filter so we only pull context from THIS run
+        _run_filter = None
+        if run_id:
+            try:
+                _run_filter = Filter(
+                    must=[FieldCondition(
+                        key="run_id",
+                        match=MatchValue(value=run_id),
+                    )]
+                )
+            except Exception:
+                _run_filter = None  # qdrant-client version doesn't support it — skip
+
         for col in ("rules", "sources"):
             count = client.get_collection(col).points_count
             if count == 0:
                 continue
             try:
                 # qdrant-client >= 1.10 uses query_points()
-                qr   = client.query_points(
+                qr = client.query_points(
                     collection_name=col,
                     query=vec,
+                    query_filter=_run_filter,
                     limit=min(n_results, count),
                     with_payload=True,
                 )
@@ -200,6 +257,7 @@ def retrieve_context(client, query_text: str, n_results: int = 4, **kwargs) -> l
                 hits = client.search(
                     collection_name=col,
                     query_vector=vec,
+                    query_filter=_run_filter,
                     limit=min(n_results, count),
                 )
             texts.extend(h.payload.get("text", "") for h in hits)
@@ -209,11 +267,32 @@ def retrieve_context(client, query_text: str, n_results: int = 4, **kwargs) -> l
         return []
 
 
-def get_all_records(client, collection: str, limit: int = 200) -> list:
-    """Fetch all stored points for Second Brain visualisation."""
+def get_all_records(client, collection: str, limit: int = 200,
+                    run_id: str = "") -> list:
+    """
+    Fetch stored points for Second Brain visualisation.
+    When run_id is provided, returns only records from that run so the
+    Second Brain tab shows the current session's data, not every run ever.
+    """
     try:
-        result = client.scroll(collection_name=collection, limit=limit,
-                               with_payload=True, with_vectors=False)
+        _scroll_filter = None
+        if run_id:
+            try:
+                _scroll_filter = Filter(
+                    must=[FieldCondition(
+                        key="run_id",
+                        match=MatchValue(value=run_id),
+                    )]
+                )
+            except Exception:
+                _scroll_filter = None
+        result = client.scroll(
+            collection_name=collection,
+            scroll_filter=_scroll_filter,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        )
         return [pt.payload for pt in result[0]]
     except Exception as e:
         print(f"   [M3] scroll error ({collection}): {e}")
