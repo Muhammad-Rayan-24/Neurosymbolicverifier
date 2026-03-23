@@ -823,8 +823,28 @@ with col_left:
         st.markdown('<p style="font-size:0.73rem;color:rgba(232,228,220,0.45);margin-bottom:0.5rem;">Leave blank for fast in-memory Qdrant.</p>', unsafe_allow_html=True)
         qdrant_url_input = st.text_input("Qdrant URL", placeholder="https://…qdrant.io:6333 or blank", key="qdrant_url_field")
         qdrant_key_input = st.text_input("Qdrant API Key", type="password", placeholder="your-qdrant-api-key or blank", key="qdrant_key_field")
-    qdrant_url = qdrant_url_input.strip() or st.session_state.resolved_qdrant_url or None
-    qdrant_key = qdrant_key_input.strip() or st.session_state.resolved_qdrant_key or None
+    # Fall back to the baked-in module constants if the UI fields + env are both empty
+    try:
+        import m3_vector_db as _m3_cfg
+        _m3_qdrant_url = _m3_cfg.QDRANT_URL
+        _m3_qdrant_key = _m3_cfg.QDRANT_API_KEY
+    except Exception:
+        _m3_qdrant_url = ""
+        _m3_qdrant_key = ""
+    qdrant_url = (qdrant_url_input.strip()
+                  or st.session_state.resolved_qdrant_url
+                  or _m3_qdrant_url
+                  or None)
+    qdrant_key = (qdrant_key_input.strip()
+                  or st.session_state.resolved_qdrant_key
+                  or _m3_qdrant_key
+                  or None)
+    if qdrant_url and not qdrant_url_input.strip():
+        st.markdown(
+            '<p style="font-size:0.7rem;color:rgba(109,206,168,0.7);margin-top:-0.25rem;">'
+            '🔒 Qdrant cloud credentials loaded from module config</p>',
+            unsafe_allow_html=True,
+        )
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -901,7 +921,34 @@ with col_left:
         )
         _custom_url_list = [u.strip() for u in _url_raw.splitlines() if u.strip().startswith("http")]
         if _custom_url_list:
-            st.caption(f"✅ {len(_custom_url_list)} URL(s) queued — fetched concurrently at run time")
+            # Warn about video/JS-only URLs before the run starts
+            _VIDEO_WARN_DOMAINS = {
+                "youtube.com", "youtu.be", "vimeo.com", "dailymotion.com",
+                "twitch.tv", "tiktok.com", "twitter.com", "x.com",
+                "instagram.com", "facebook.com", "linkedin.com",
+            }
+            import urllib.parse as _up
+            _bad_urls = [
+                u for u in _custom_url_list
+                if any(
+                    _up.urlparse(u).netloc.lower().lstrip("www.") == d
+                    or _up.urlparse(u).netloc.lower().lstrip("www.").endswith("." + d)
+                    for d in _VIDEO_WARN_DOMAINS
+                )
+            ]
+            if _bad_urls:
+                st.warning(
+                    f"⚠️ **{len(_bad_urls)} unsupported URL(s) detected:** "
+                    f"Video platforms (YouTube, Vimeo, TikTok) and social media "
+                    f"sites cannot be scraped for text — the system cannot watch "
+                    f"or transcribe videos. These URLs will be skipped.\n\n"
+                    f"**To use video content:** paste the transcript or description "
+                    f"directly into the Reference Document field above.",
+                    icon="🎥",
+                )
+            _ok_urls = [u for u in _custom_url_list if u not in _bad_urls]
+            if _ok_urls:
+                st.caption(f"✅ {len(_ok_urls)} URL(s) queued — fetched concurrently at run time")
 
     use_web_research = (use_wikipedia or use_duckduckgo or use_web_search
                         or use_google_search or bool(_custom_url_list))
@@ -1057,6 +1104,15 @@ with col_left:
         st.session_state.results       = None
         st.session_state.brain_records = {}
         st.session_state["_pipeline_running"] = False
+        # Reset the Qdrant client singleton so the next run starts with
+        # a completely fresh connection and empty in-memory store.
+        # This is the key fix for cross-query contamination — without this,
+        # the module-level _CLIENT retains all data from prior runs.
+        try:
+            import m3_vector_db as _m3_reset
+            _m3_reset.reset_client()
+        except Exception:
+            pass
         st.success("✅ Reset complete — ready for a new run.", icon="🔄")
         st.rerun()
 
@@ -1351,13 +1407,18 @@ with col_right:
             try:
                 if source_results:
                     for src in source_results:
-                        m3.store_source(qdrant_client, src)
-                    brain_records["sources"] = m3.get_all_records(qdrant_client, "sources")
+                        m3.store_source(qdrant_client, src, run_id=run_id)
+                    brain_records["sources"] = m3.get_all_records(
+                        qdrant_client, "sources", run_id=run_id)
                 if structured_rules:
-                    m3.store_all_rules(qdrant_client, structured_rules)
-                    brain_records["rules"] = m3.get_all_records(qdrant_client, "rules")
+                    m3.store_all_rules(qdrant_client, structured_rules, run_id=run_id)
+                    brain_records["rules"] = m3.get_all_records(
+                        qdrant_client, "rules", run_id=run_id)
                 query          = user_prompt or existing_draft
-                memory_context = m3.retrieve_context(qdrant_client, query, n_results=4)
+                # IMPORTANT: pass run_id so retrieve_context only pulls
+                # context from THIS run — prevents cross-query contamination
+                memory_context = m3.retrieve_context(
+                    qdrant_client, query, n_results=4, run_id=run_id)
                 results["memory_context"] = memory_context
             except Exception as e:
                 st.warning(f"Qdrant step failed (non-fatal): {e}")
@@ -1554,7 +1615,8 @@ with col_right:
                 try:
                     for ar in audit_results:
                         m3.store_audit_result(qdrant_client, ar, run_id=run_id)
-                    brain_records["audit"] = m3.get_all_records(qdrant_client, "audit")
+                    brain_records["audit"] = m3.get_all_records(
+                        qdrant_client, "audit", run_id=run_id)
                 except Exception:
                     pass
 
@@ -2961,4 +3023,10 @@ with col_right:
             st.session_state.results       = None
             st.session_state.brain_records = {}
             st.session_state["_pipeline_running"] = False
+            # Reset Qdrant client — same fix as hard reset above
+            try:
+                import m3_vector_db as _m3_reset
+                _m3_reset.reset_client()
+            except Exception:
+                pass
             st.rerun()
