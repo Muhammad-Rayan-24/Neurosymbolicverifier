@@ -1,4 +1,3 @@
-import anthropic
 import json
 import re
 import hashlib
@@ -6,52 +5,119 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MODULE 2 — LLM PARSER & STRUCTURED CONSTRAINT AUDITOR
+# MODULE 2 — LLM PARSER & STRUCTURED CONSTRAINT AUDITOR v4
 # ============================================================
-# v3 CHANGES:
-#  1. OpenAI → Anthropic Claude (claude-sonnet-4-5)
-#  2. GRADED SCORING — audit returns compliance_score [0,1]
-#     instead of binary pass/fail. A rule 80% satisfied
-#     returns conclusion_confidence=0.8, not 0.05.
-#  3. Graded symbolic scoring for numerical rules:
-#     how far is the value from the threshold?
-#  4. Graded semantic scoring for boolean/qualitative rules:
-#     Claude returns a 0-1 quality score, not just true/false.
-#  All other optimisations preserved:
-#  - Shared client cache, parallel rule parsing,
-#    batched audit, result cache, scope-aware extraction,
-#    unit normalisation, domain validity check.
+# Multi-provider: Anthropic / OpenAI / Google via _call_llm()
+# llm_config = {"provider":"anthropic"|"openai"|"google",
+#               "model": "<id>", "api_key": "<key>",
+#               "thinking": True|False}
+# Thinking models handled automatically:
+#   Anthropic: extended thinking via betas header
+#   OpenAI o-series: max_completion_tokens, no temp
+#   Gemini 3.x: thinking built-in, no extra params
 # ============================================================
 
-_MODEL       = "claude-sonnet-4-5"
 _MAX_WORKERS = 8
 _AUDIT_BATCH = 12
-
 _CLIENT_CACHE: dict = {}
 _PARSE_CACHE:  dict = {}
 
+_DEFAULT_CONFIG = {
+    "provider": "anthropic",
+    "model"   : "claude-sonnet-4-6",
+    "api_key" : "",
+    "thinking": False,
+}
 
-def _get_client(api_key: str) -> anthropic.Anthropic:
-    key = (api_key or "").strip()
-    if not key:
-        raise ValueError(
-            "Anthropic API key is empty. Set ANTHROPIC_API_KEY or paste it in the UI."
-        )
-    h = hashlib.md5(key.encode()).hexdigest()
-    if h not in _CLIENT_CACHE:
-        _CLIENT_CACHE[h] = anthropic.Anthropic(api_key=key)
-    return _CLIENT_CACHE[h]
+# o-series reasoning models (use max_completion_tokens, no temperature)
+_O_SERIES = {"o3", "o3-pro", "o3-mini", "o4-mini", "o1", "o1-mini", "o1-pro"}
 
 
+def _call_llm(prompt: str, llm_config: dict = None, max_tokens: int = 4096) -> str:
+    """Universal LLM dispatcher: Anthropic / OpenAI / Google."""
+    cfg      = llm_config or _DEFAULT_CONFIG
+    provider = cfg.get("provider", "anthropic").lower()
+    model    = cfg.get("model", "claude-sonnet-4-6")
+    api_key  = cfg.get("api_key", "").strip()
+    thinking = cfg.get("thinking", False)
+
+    if not api_key:
+        raise ValueError(f"API key is empty for provider '{provider}'.")
+
+    ck = hashlib.md5((provider + model + api_key).encode()).hexdigest()
+
+    # ── Anthropic ─────────────────────────────────────────────────────────
+    if provider == "anthropic":
+        import anthropic as _ant
+        if ck not in _CLIENT_CACHE:
+            _CLIENT_CACHE[ck] = _ant.Anthropic(api_key=api_key)
+        client = _CLIENT_CACHE[ck]
+        if thinking:
+            budget = min(8000, max(1024, max_tokens // 2))
+            try:
+                resp = client.messages.create(
+                    model=model, max_tokens=max_tokens,
+                    thinking={"type": "enabled", "budget_tokens": budget},
+                    messages=[{"role": "user", "content": prompt}],
+                    betas=["interleaved-thinking-2025-05-14"],
+                )
+                return "".join(
+                    b.text for b in resp.content
+                    if getattr(b, "type", "") == "text"
+                )
+            except Exception:
+                # Fallback without thinking if beta not supported
+                resp = client.messages.create(
+                    model=model, max_tokens=max_tokens,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                return resp.content[0].text
+        else:
+            resp = client.messages.create(
+                model=model, max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return resp.content[0].text
+
+    # ── OpenAI ────────────────────────────────────────────────────────────
+    elif provider == "openai":
+        import openai as _oai
+        if ck not in _CLIENT_CACHE:
+            _CLIENT_CACHE[ck] = _oai.OpenAI(api_key=api_key)
+        client = _CLIENT_CACHE[ck]
+        if model in _O_SERIES:
+            # Reasoning models: no temperature, use max_completion_tokens
+            resp = client.chat.completions.create(
+                model=model,
+                max_completion_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        else:
+            resp = client.chat.completions.create(
+                model=model, max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        return resp.choices[0].message.content
+
+    # ── Google Gemini ──────────────────────────────────────────────────────
+    elif provider == "google":
+        import google.generativeai as _genai
+        _genai.configure(api_key=api_key)
+        resp = _genai.GenerativeModel(model).generate_content(prompt)
+        return resp.text
+
+    else:
+        raise ValueError(f"Unknown provider: '{provider}'.")
+
+
+# Legacy alias — backwards compat
 def _claude(api_key: str, prompt: str, max_tokens: int = 4096) -> str:
-    """Single-turn Claude call using cached client."""
-    client   = _get_client(api_key)
-    response = client.messages.create(
-        model    = _MODEL,
-        max_tokens = max_tokens,
-        messages = [{"role": "user", "content": prompt}],
+    return _call_llm(
+        prompt,
+        {"provider": "anthropic", "model": "claude-sonnet-4-6",
+         "api_key": api_key, "thinking": False},
+        max_tokens,
     )
-    return response.content[0].text
 
 
 # ── Rule parsing ──────────────────────────────────────────────────────────────
@@ -93,7 +159,7 @@ Key: if the rule contains words like 'currently', 'is reading', 'now shows', 'at
 it is an 'observation' with scope 'context_only', NOT a constraint enforced everywhere."""
 
     try:
-        raw    = _call_llm(prompt, (llm_config or {"provider":"anthropic","model":"claude-sonnet-4-5","api_key":api_key}), max_tokens=512)
+        raw    = _call_llm(prompt, (llm_config or {"provider":"anthropic","model":"claude-sonnet-4-6","api_key":api_key}), max_tokens=512)
         clean  = raw.strip().replace("```json", "").replace("```", "").strip()
         result = json.loads(clean)
         _PARSE_CACHE[cache_key] = result
@@ -235,7 +301,7 @@ Rules:
 
     try:
         t0  = time.perf_counter()
-        raw = _call_llm(prompt, (llm_config or {"provider":"anthropic","model":"claude-sonnet-4-5","api_key":api_key}), max_tokens=4096)
+        raw = _call_llm(prompt, (llm_config or {"provider":"anthropic","model":"claude-sonnet-4-6","api_key":api_key}), max_tokens=4096)
         print(f"   [M2] Batch audit {len(rules)} rule(s) in {time.perf_counter()-t0:.2f}s")
         clean    = raw.strip().replace("```json", "").replace("```", "").strip()
         llm_list = json.loads(clean)
@@ -283,7 +349,7 @@ Return ONLY raw JSON with graded compliance_score [0.0-1.0]:
   "explanation": "<one sentence>"
 }}"""
     try:
-        raw     = _call_llm(prompt, (llm_config or {"provider":"anthropic","model":"claude-sonnet-4-5","api_key":api_key}), max_tokens=512)
+        raw     = _call_llm(prompt, (llm_config or {"provider":"anthropic","model":"claude-sonnet-4-6","api_key":api_key}), max_tokens=512)
         clean   = raw.strip().replace("```json", "").replace("```", "").strip()
         llm_res = json.loads(clean)
     except Exception:
