@@ -12,7 +12,7 @@ import io, re as _re
 
 def _draft_to_pdf(draft_text: str, run_id: str = "", ltn_score: float = None,
                   rules_passed: int = 0, rules_total: int = 0,
-                  iterations_used: int = 1) -> bytes:
+                  iterations_used: int = 1, llm_label: str = "Claude") -> bytes:
     """Convert verified draft markdown text to a clean PDF. Returns raw bytes."""
     try:
         from fpdf import FPDF
@@ -25,7 +25,7 @@ def _draft_to_pdf(draft_text: str, run_id: str = "", ltn_score: float = None,
             self.set_text_color(120, 120, 120)
             self.cell(0, 8, "NeuroSymbolic Verifier -- Verified Draft Output", align="L")
             if ltn_score is not None:
-                badge = f"LTN {ltn_score:.4f}  |  {rules_passed}/{rules_total} rules  |  {iterations_used} iter(s)  |  run {run_id}"
+                badge = f"LTN {ltn_score:.4f}  |  {rules_passed}/{rules_total} rules  |  {iterations_used} iter(s)  |  {llm_label}  |  run {run_id}"
                 self.cell(0, 8, badge, align="R")
             self.ln(2)
             self.set_draw_color(200, 169, 110)
@@ -438,16 +438,71 @@ col_left, col_right = st.columns([1, 1.2], gap="large")
 
 with col_left:
 
-    # ── API Key ───────────────────────────────────────────────────────────────
-    st.markdown('<div class="section-label">🔑 Anthropic API Key</div>', unsafe_allow_html=True)
-    _hint     = "Auto-loaded ✓" if st.session_state.resolved_api_key else "sk-ant-…"
-    api_input = st.text_input("api_key", label_visibility="collapsed",
-                               type="password", placeholder=_hint, key="api_key_field")
-    api_key   = api_input.strip() or st.session_state.resolved_api_key
-    if st.session_state.resolved_api_key and not api_input.strip():
+    # ── LLM Provider + Model + API Key ───────────────────────────────────────
+    st.markdown('<div class="section-label">🤖 LLM Provider</div>', unsafe_allow_html=True)
+
+    _PROVIDERS = {
+        "Anthropic (Claude)": {
+            "id": "anthropic",
+            "models": [
+                "claude-sonnet-4-5",
+                "claude-opus-4-5",
+                "claude-haiku-4-5-20251001",
+            ],
+            "key_hint" : "sk-ant-…",
+            "env_key"  : "ANTHROPIC_API_KEY",
+            "resolved" : st.session_state.resolved_api_key,
+        },
+        "OpenAI (GPT)": {
+            "id": "openai",
+            "models": [
+                "gpt-4o",
+                "gpt-4o-mini",
+                "gpt-4.1",
+                "gpt-4.1-mini",
+            ],
+            "key_hint" : "sk-…",
+            "env_key"  : "OPENAI_API_KEY",
+            "resolved" : _resolve("OPENAI_API_KEY"),
+        },
+        "Google (Gemini)": {
+            "id": "google",
+            "models": [
+                "gemini-2.5-flash",
+                "gemini-2.5-pro",
+                "gemini-2.0-flash",
+                "gemini-1.5-pro",
+            ],
+            "key_hint" : "AIza…",
+            "env_key"  : "GOOGLE_API_KEY",
+            "resolved" : _resolve("GOOGLE_API_KEY"),
+        },
+    }
+
+    _provider_name = st.selectbox(
+        "provider_select", label_visibility="collapsed",
+        options=list(_PROVIDERS.keys()), key="provider_select",
+    )
+    _prov = _PROVIDERS[_provider_name]
+
+    _model_choice = st.selectbox(
+        "model_select", label_visibility="collapsed",
+        options=_prov["models"], key=f"model_select_{_prov['id']}",
+    )
+
+    _hint = "Auto-loaded ✓" if _prov["resolved"] else _prov["key_hint"]
+    api_input = st.text_input(
+        f"{_provider_name} API Key", label_visibility="collapsed",
+        type="password", placeholder=_hint, key="api_key_field"
+    )
+    api_key = api_input.strip() or _prov["resolved"]
+    if _prov["resolved"] and not api_input.strip():
         st.markdown('<p style="font-size:0.7rem;color:rgba(109,206,168,0.7);margin-top:-0.25rem;">🔒 Loaded from environment</p>', unsafe_allow_html=True)
     elif not api_key:
-        st.markdown('<p style="font-size:0.7rem;color:rgba(232,115,109,0.7);margin-top:-0.25rem;">⚠ No key found</p>', unsafe_allow_html=True)
+        st.markdown('<p style="font-size:0.7rem;color:rgba(232,115,109,0.7);margin-top:-0.25rem;">⚠ No key found — paste above</p>', unsafe_allow_html=True)
+
+    # Build the llm_config dict passed through the entire pipeline
+    llm_config = {"provider": _prov["id"], "model": _model_choice, "api_key": api_key or ""}
 
     # ── Qdrant Config ─────────────────────────────────────────────────────────
     with st.expander("🧠 Qdrant Config (optional — defaults to in-memory)", expanded=False):
@@ -613,10 +668,10 @@ with col_right:
         prog.progress(8, text="⚡ Research & rule parsing in parallel…")
 
         def _run_research():
-            return m4.research_all_sources(user_prompt, api_key=api_key)
+            return m4.research_all_sources(user_prompt, api_key=api_key, llm_config=llm_config)
 
         def _run_rule_parse():
-            return m2.parse_rules_parallel(rules_snapshot, api_key)
+            return m2.parse_rules_parallel(rules_snapshot, api_key, llm_config=llm_config)
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = {}
@@ -667,12 +722,7 @@ with col_right:
                     f"Example bad rule: 'design must be good' (unverifiable)"
                 )
                 try:
-                    client_anth = _anthropic.Anthropic(api_key=api_key)
-                    resp = client_anth.messages.create(
-                        model=m2._MODEL, max_tokens=512,
-                        messages=[{"role":"user","content":derivation_prompt}]
-                    )
-                    raw_rt = resp.content[0].text.strip().replace("```json","").replace("```","").strip()
+                    raw_rt = m2._call_llm(derivation_prompt, llm_config, max_tokens=512).strip().replace("```json","").replace("```","").strip()
                     rule_texts = json.loads(raw_rt)
                     if isinstance(rule_texts, list):
                         for rt in rule_texts:
@@ -778,20 +828,51 @@ with col_right:
 
                 try:
                     status.info(f"⚡ {iter_label} — streaming draft with Claude…")
-                    client_anth = _anthropic.Anthropic(api_key=api_key)
-                    stream_box  = st.empty()
-                    collected   = []
-                    with client_anth.messages.stream(
-                        model=m2._MODEL, max_tokens=16000,
-                        messages=[{"role":"user","content":gen_prompt}]
-                    ) as stream:
-                        for text_chunk in stream.text_stream:
-                            collected.append(text_chunk)
-                            live = "".join(collected)
-                            safe = live.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-                            stream_box.markdown(
-                                f'<div class="gen-output" style="max-height:200px">{safe}</div>',
-                                unsafe_allow_html=True)
+                    stream_box = st.empty()
+                    collected  = []
+
+                    if llm_config.get("provider") == "anthropic":
+                        import anthropic as _ant
+                        _anth_client = _ant.Anthropic(api_key=api_key)
+                        with _anth_client.messages.stream(
+                            model=llm_config["model"], max_tokens=16000,
+                            messages=[{"role":"user","content":gen_prompt}]
+                        ) as stream:
+                            for text_chunk in stream.text_stream:
+                                collected.append(text_chunk)
+                                live = "".join(collected)
+                                safe = live.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+                                stream_box.markdown(
+                                    f'<div class="gen-output" style="max-height:200px">{safe}</div>',
+                                    unsafe_allow_html=True)
+
+                    elif llm_config.get("provider") == "openai":
+                        import openai as _oai
+                        _oai_client = _oai.OpenAI(api_key=api_key)
+                        stream = _oai_client.chat.completions.create(
+                            model=llm_config["model"], max_tokens=16000,
+                            stream=True,
+                            messages=[{"role":"user","content":gen_prompt}]
+                        )
+                        for chunk in stream:
+                            delta = chunk.choices[0].delta.content
+                            if delta:
+                                collected.append(delta)
+                                live = "".join(collected)
+                                safe = live.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+                                stream_box.markdown(
+                                    f'<div class="gen-output" style="max-height:200px">{safe}</div>',
+                                    unsafe_allow_html=True)
+
+                    else:  # Google Gemini — no streaming SDK, single call
+                        stream_box.info("Generating with Gemini...")
+                        result = m2._call_llm(gen_prompt, llm_config, max_tokens=16000)
+                        collected = [result]
+                        safe = result.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+                        stream_box.markdown(
+                            f'<div class="gen-output" style="max-height:200px">{safe}</div>',
+                            unsafe_allow_html=True)
+
                     draft_text = "".join(collected)
                     stream_box.empty()
                     status.empty()
@@ -805,7 +886,7 @@ with col_right:
                 prog.progress(min(99, 55 + attempt * 6), text=f"🔍 {iter_label} -- auditing...")
                 status.info(f"M2 auditing {len(structured_rules)} rule(s)…")
                 try:
-                    audit_results = m2.structured_audit(draft_text, structured_rules, api_key)
+                    audit_results = m2.structured_audit(draft_text, structured_rules, api_key, llm_config=llm_config)
                 except Exception as e:
                     st.error(f"Audit failed: {e}"); st.stop()
                 status.empty()
@@ -881,6 +962,9 @@ with col_right:
             "run_id"           : run_id,
             "iteration_history": iteration_history,
             "user_prompt"      : user_prompt.strip(),
+            "llm_provider"     : _prov["id"],
+            "llm_model"        : _model_choice,
+            "llm_provider_name": _provider_name,
         })
         st.session_state.results           = results
         st.session_state.brain_records      = brain_records
@@ -926,6 +1010,7 @@ with col_right:
                     <div class="score-big {sc}">{score:.4f}</div>
                     <div style="font-family:'DM Mono',monospace;font-size:0.85rem;color:{vc};font-weight:600;letter-spacing:0.1em;margin-top:0.2rem;">{vt}</div>
                     <div class="score-label" style="margin-top:0.3rem;">LTN Universal Verification Score (threshold: {thresh:.2f})</div>
+                    <div style="font-size:0.68rem;color:rgba(200,169,110,0.6);margin-top:0.4rem;font-family:'DM Mono',monospace;">Generated by {res.get('llm_provider_name','Claude')} · {res.get('llm_model','')}</div>
                 </div>""", unsafe_allow_html=True)
 
             if audit:
@@ -1528,9 +1613,10 @@ with col_right:
             # ── Section 6: Download report as text ────────────────────────────
             st.markdown("<br>", unsafe_allow_html=True)
             _report_lines = [
-                "NEUROSYMBOLIC VERIFIER — TRANSPARENCY REPORT",
+                "NEUROSYMBOLIC VERIFIER -- TRANSPARENCY REPORT",
                 "=" * 55,
                 f"Run ID        : {_run_id}",
+                f"LLM           : {res.get('llm_provider_name','Claude')} / {res.get('llm_model','')}",
                 f"Verdict       : {_verdict}",
                 f"LTN Score     : {_score:.4f}  (threshold: {_thresh:.2f})",
                 f"Rules checked : {len(_audit)}  ({_n_pass} passed, {_n_fail} failed)",
@@ -1581,7 +1667,7 @@ with col_right:
                         def header(self):
                             self.set_font("Helvetica", "B", 9)
                             self.set_text_color(120, 120, 120)
-                            self.cell(0, 8, f"NeuroSymbolic Verifier -- Transparency Report  |  run {_run_id}", align="L")
+                            self.cell(0, 8, f"NeuroSymbolic Verifier -- Transparency Report  |  {res.get('llm_provider_name','Claude')} / {res.get('llm_model','')}  |  run {_run_id}", align="L")
                             self.ln(2)
                             self.set_draw_color(200, 169, 110)
                             self.set_line_width(0.4)
