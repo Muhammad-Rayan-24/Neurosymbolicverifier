@@ -101,11 +101,57 @@ def _draft_to_pdf(draft_text: str, run_id: str = "", ltn_score: float = None,
     # including in positions where the line-level safe() call might be skipped.
     draft_text = sanitize(draft_text)
 
-    for raw_line in draft_text.split("\n"):
+    # Pre-collect lines so we can look ahead for table blocks
+    _lines = draft_text.split("\n")
+    _li = 0
+    while _li < len(_lines):
+        raw_line = _lines[_li]; _li += 1
         line = raw_line.rstrip()
 
         if not line.strip():
             pdf.ln(3); continue
+
+        # ── Markdown table detection: consume all | rows at once ───────────
+        if line.startswith("|"):
+            _tbl_lines = [line]
+            while _li < len(_lines) and _lines[_li].strip().startswith("|"):
+                _tbl_lines.append(_lines[_li].strip()); _li += 1
+            # Filter out separator rows (|---|---| style)
+            _data_rows = [r for r in _tbl_lines
+                          if not _r.match(r'^[|][-:\s|]+[|]', r)]
+            if _data_rows:
+                _cells = [[safe(c.strip()) for c in row.strip("|").split("|")]
+                          for row in _data_rows]
+                _ncols = max(len(row) for row in _cells)
+                _col_w = cw / _ncols
+                for _ri, _row in enumerate(_cells):
+                    _is_hdr = (_ri == 0)
+                    pdf.set_font("Helvetica","B" if _is_hdr else "",8)
+                    pdf.set_fill_color(230,240,250) if _is_hdr else pdf.set_fill_color(255,255,255)
+                    set_c((27,58,92) if _is_hdr else C_BODY)
+                    _row_h = 5
+                    # Calculate max height needed for this row
+                    _max_lines = max(
+                        len(pdf.multi_cell(_col_w-2, _row_h, c, split_only=True))
+                        if hasattr(pdf,"multi_cell") else 1
+                        for c in (_row + [""] * (_ncols - len(_row)))
+                    )
+                    _rh = _max_lines * _row_h
+                    _x0 = pdf.l_margin
+                    _y0 = pdf.get_y()
+                    if _y0 + _rh > pdf.h - 18:
+                        pdf.add_page(); _y0 = pdf.get_y()
+                    for _ci, _cell in enumerate((_row + [""] * (_ncols - len(_row)))):
+                        pdf.set_xy(_x0 + _ci * _col_w, _y0)
+                        pdf.set_draw_color(180,180,180)
+                        pdf.set_line_width(0.2)
+                        pdf.rect(_x0 + _ci * _col_w, _y0, _col_w, _rh)
+                        pdf.set_xy(_x0 + _ci * _col_w + 1, _y0 + 1)
+                        pdf.multi_cell(_col_w - 2, _row_h, _cell,
+                                       align="C" if _is_hdr else "L",
+                                       fill=_is_hdr, border=0)
+                    pdf.set_xy(_x0, _y0 + _rh)
+            pdf.ln(2); continue
 
         # H1
         if line.startswith("# ") and not line.startswith("## "):
@@ -1700,32 +1746,110 @@ with col_right:
   </div>
 </div>""", unsafe_allow_html=True)
 
-            # ── Section 4: How the rewrite loop worked ────────────────────────
-            if _history and len(_history) > 1:
+            # ── Section 4: Iteration convergence ─────────────────────────────
+            if _history:
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.markdown("""
 <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.12em;
             color:#c8a96e;font-weight:600;margin-bottom:0.8rem;">
-  How the self-correction loop worked
+  Iteration Convergence
 </div>""", unsafe_allow_html=True)
 
-                for h in _history:
-                    n_p  = sum(1 for r in h["audit"] if r.get("satisfies"))
-                    n_t  = len(h["audit"])
-                    lsc  = h["ltn_score"]
-                    viols = h.get("violations", [])
-                    col_s = "#6dcea8" if lsc >= _thresh else ("#e8c06d" if lsc >= 0.5 else "#e8736d")
-                    label = "Final iteration — passed" if (h["attempt"] == len(_history) and _passed) else                             ("Final iteration — did not pass" if h["attempt"] == len(_history) else
-                             f"Iteration {h['attempt']} — triggered rewrite")
+                # ── Visual score progression bar chart ────────────────────────
+                _scores = [h["ltn_score"] for h in _history]
+                _bar_html = '<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:1rem;">' 
+                for _hi, h in enumerate(_history):
+                    _lsc  = h["ltn_score"]
+                    _np   = sum(1 for r in h["audit"] if r.get("satisfies"))
+                    _nt   = len(h["audit"]) or 1
+                    _pct  = int(_lsc * 100)
+                    _bc   = "#6dcea8" if _lsc >= _thresh else ("#e8c06d" if _lsc >= 0.5 else "#e8736d")
+                    _delta = ""
+                    if _hi > 0:
+                        _d = _lsc - _scores[_hi-1]
+                        _dsign = "+" if _d >= 0 else ""
+                        _dc = "#6dcea8" if _d > 0 else ("#e8736d" if _d < 0 else "#888")
+                        _delta = f'<span style="font-size:0.68rem;color:{_dc};margin-left:0.5rem;">{_dsign}{_d:.4f}</span>'
+                    _is_last = h["attempt"] == len(_history)
+                    _suffix = " ✓ FINAL" if (_is_last and _passed) else (" ✗ FINAL" if _is_last else " → rewrite")
+                    _bar_html += f'''
+<div style="display:flex;align-items:center;gap:8px;">
+  <span style="font-family:DM Mono,monospace;font-size:0.72rem;color:rgba(232,228,220,0.5);
+               min-width:52px;">Iter {h["attempt"]}</span>
+  <div style="flex:1;background:rgba(255,255,255,0.05);border-radius:4px;height:16px;position:relative;">
+    <div style="width:{_pct}%;background:{_bc};height:100%;border-radius:4px;
+                transition:width 0.3s ease;"></div>
+    <span style="position:absolute;left:6px;top:50%;transform:translateY(-50%);
+                 font-size:0.65rem;color:#0c0e14;font-weight:700;line-height:1;">
+      {_lsc:.4f}  {_np}/{_nt} rules
+    </span>
+  </div>
+  {_delta}
+  <span style="font-size:0.65rem;color:rgba(232,228,220,0.3);white-space:nowrap;">{_suffix}</span>
+</div>'''
+                _bar_html += '</div>'
+                st.markdown(_bar_html, unsafe_allow_html=True)
 
-                    with st.expander(f"Iteration {h['attempt']}: score {lsc:.4f} · {n_p}/{n_t} rules · {label}"):
-                        if viols:
-                            st.markdown(f"""
-<p style="font-size:0.83rem;color:rgba(232,228,220,0.6);margin-bottom:0.5rem;">
-  {len(viols)} rule(s) failed in this iteration.
-  {"The system used this feedback to rewrite the draft." if h["attempt"] < len(_history) else "This was the final attempt."}
-</p>""", unsafe_allow_html=True)
-                            for v in viols:
+                # Threshold reference
+                st.caption(f"Pass threshold: {_thresh:.2f} | Bar width = LTN score proportion")
+
+                # ── Per-iteration detail expanders ────────────────────────────
+                for _hi, h in enumerate(_history):
+                    _lsc  = h["ltn_score"]
+                    _np   = sum(1 for r in h["audit"] if r.get("satisfies"))
+                    _nt   = len(h["audit"])
+                    _viols = h.get("violations", [])
+                    _col_s = "#6dcea8" if _lsc >= _thresh else ("#e8c06d" if _lsc >= 0.5 else "#e8736d")
+                    _is_last = h["attempt"] == len(_history)
+                    _label = ("✅ Final — passed" if (_is_last and _passed)
+                              else ("❌ Final — did not pass" if _is_last
+                                    else f"⚠️ Triggered rewrite"))
+
+                    with st.expander(f"Iteration {h['attempt']}: {_lsc:.4f}  ·  {_np}/{_nt} rules  ·  {_label}"):
+
+                        # Rules that changed state vs previous iteration
+                        if _hi > 0:
+                            _prev_audit = {r.get("rule_id"): r for r in _history[_hi-1]["audit"]}
+                            _curr_audit = {r.get("rule_id"): r for r in h["audit"]}
+                            _improved, _degraded, _unchanged_fail = [], [], []
+                            for _rid, _cr in _curr_audit.items():
+                                _pr = _prev_audit.get(_rid)
+                                if _pr:
+                                    _pd, _cd = _pr.get("compliance_score",0), _cr.get("compliance_score",0)
+                                    if _cd > _pd + 0.01:
+                                        _improved.append((_cr.get("rule_display",""), _pd, _cd))
+                                    elif _cd < _pd - 0.01:
+                                        _degraded.append((_cr.get("rule_display",""), _pd, _cd))
+                                    elif not _cr.get("satisfies"):
+                                        _unchanged_fail.append(_cr.get("rule_display",""))
+
+                            if _improved:
+                                st.markdown("**Rules that improved this iteration:**")
+                                for _rd, _pd, _cd in _improved:
+                                    st.markdown(
+                                        f'<div style="padding:0.3rem 0.7rem;background:rgba(109,206,168,0.07);'
+                                        f'border-left:3px solid #6dcea8;border-radius:0 6px 6px 0;'
+                                        f'font-size:0.79rem;margin-bottom:0.3rem;">'
+                                        f'✅ {_rd.replace("<","&lt;")} &nbsp;'
+                                        f'<span style="color:rgba(232,228,220,0.4);">'
+                                        f'{_pd:.2f} → <strong style="color:#6dcea8">{_cd:.2f}</strong></span></div>',
+                                        unsafe_allow_html=True)
+                            if _degraded:
+                                st.markdown("**Rules that got worse:**")
+                                for _rd, _pd, _cd in _degraded:
+                                    st.markdown(
+                                        f'<div style="padding:0.3rem 0.7rem;background:rgba(232,115,109,0.07);'
+                                        f'border-left:3px solid #e8736d;border-radius:0 6px 6px 0;'
+                                        f'font-size:0.79rem;margin-bottom:0.3rem;">'
+                                        f'📉 {_rd.replace("<","&lt;")} &nbsp;'
+                                        f'<span style="color:rgba(232,228,220,0.4);">'
+                                        f'{_pd:.2f} → <strong style="color:#e8736d">{_cd:.2f}</strong></span></div>',
+                                        unsafe_allow_html=True)
+
+                        # Violations that triggered the next rewrite
+                        if _viols and not _is_last:
+                            st.markdown(f"**{len(_viols)} rule(s) failed — system rewrote the draft:**")
+                            for v in _viols:
                                 vd = v.get("rule_display","").replace("<","&lt;")
                                 ve = v.get("explanation","").replace("<","&lt;")
                                 vs = v.get("compliance_score", 0)
@@ -1739,8 +1863,20 @@ with col_right:
   </span>
   <div style="color:rgba(232,228,220,0.5);margin-top:0.2rem;">{ve}</div>
 </div>""", unsafe_allow_html=True)
+                        elif _is_last and not _viols:
+                            st.markdown('<p style="color:#6dcea8;font-size:0.83rem;">✅ All rules satisfied.</p>', unsafe_allow_html=True)
+                        elif _is_last and _viols:
+                            st.markdown('<p style="color:#e8736d;font-size:0.83rem;">❌ Some rules still failing at max iterations.</p>', unsafe_allow_html=True)
+
+                        # Draft word count for this iteration
+                        _wc = len(h.get("draft","").split())
+                        if _hi > 0:
+                            _pwc = len(_history[_hi-1].get("draft","").split())
+                            _wdiff = _wc - _pwc
+                            _wsign = "+" if _wdiff >= 0 else ""
+                            st.caption(f"Draft: {_wc:,} words ({_wsign}{_wdiff} vs previous iteration)")
                         else:
-                            st.markdown('<p style="color:#6dcea8;font-size:0.83rem;">All rules satisfied in this iteration.</p>', unsafe_allow_html=True)
+                            st.caption(f"Draft: {_wc:,} words")
 
             # ── Section 5: Research Sources ───────────────────────────────────
             if _sources:
@@ -1902,6 +2038,7 @@ with col_right:
                         _extr  = _rsan(str(_r.get("extracted_value_raw","N/A"))[:100])
 
                         # Status badge line
+                        _rpdf.set_x(_rpdf.l_margin)
                         _rpdf.set_font("Helvetica","B",9)
                         _rpdf.set_text_color(*_col)
                         _rpdf.cell(28, 5, f"[{_stat} {_comp:.2f}]")
@@ -1913,10 +2050,10 @@ with col_right:
                         _rpdf.set_font("Helvetica","",8)
                         _rpdf.set_text_color(90,90,90)
                         _rpdf.set_x(_rpdf.l_margin + 6)
-                        _rpdf.multi_cell(_cw-6, 4, f"Found: {_extr}", align="L")
+                        _rpdf.multi_cell(_cw-6, 4, _rsan(f"Found: {_extr}"), align="L")
                         _rpdf.set_x(_rpdf.l_margin + 6)
                         _rpdf.multi_cell(_cw-6, 4,
-                            f"Method: {_meth} | {_expl}", align="L")
+                            _rsan(f"Method: {_meth} | {_expl}"), align="L")
 
                         # Compliance bar
                         # Safety: if near page bottom, let auto page break handle it
@@ -1932,58 +2069,120 @@ with col_right:
                         _rpdf.rect(_rpdf.l_margin+6, _y_bar, _bw*_comp, 2.5, style="F")
                         _rpdf.ln(5)
 
-                    # Iteration history
-                    if _history and len(_history) > 1:
-                        _rpdf.ln(2)
+                    # Iteration history — visual score bars + per-iter comparison
+                    if _history and len(_history) >= 1:
+                        _rpdf.ln(3)
+                        if _rpdf.get_y() > _rpdf.h - 60: _rpdf.add_page()
                         _rpdf.set_font("Helvetica","B",11)
                         _rpdf.set_text_color(46,117,182)
-                        _rpdf.cell(_cw, 6, "Self-Correction History", ln=True)
-                        _rpdf.set_line_width(0.3)
+                        _rpdf.set_x(_rpdf.l_margin)
+                        _rpdf.cell(_cw, 6,
+                            f"Iteration Convergence ({len(_history)} iteration(s))", ln=True)
+                        _rpdf.set_draw_color(46,117,182); _rpdf.set_line_width(0.3)
                         _rpdf.line(_rpdf.l_margin, _rpdf.get_y(),
                                    _rpdf.w-_rpdf.r_margin, _rpdf.get_y())
-                        _rpdf.ln(3)
+                        _rpdf.ln(4)
+
+                        # Draw horizontal bar chart: one bar per iteration
+                        _bar_max_w = _cw * 0.55
+                        _bar_h     = 7
+                        _bar_gap   = 3
+                        _lbl_w     = _cw * 0.18
+                        _pct_w     = _cw * 0.12
+
                         for _h in _history:
                             _np  = sum(1 for _r in _h["audit"] if _r.get("satisfies"))
-                            _nt  = len(_h["audit"])
+                            _nt  = len(_h["audit"]) or 1
                             _ls  = _h["ltn_score"]
                             _lc  = (55,180,130) if _ls>=_thresh else ((220,180,80) if _ls>=0.5 else (220,100,95))
-                            _rpdf.set_font("Helvetica","B",9)
+                            _is_last = _h["attempt"] == len(_history)
+
+                            if _rpdf.get_y() > _rpdf.h - 28: _rpdf.add_page()
+
+                            _iy = _rpdf.get_y()
+                            # Label
+                            _rpdf.set_font("Helvetica","B" if _is_last else "",8)
                             _rpdf.set_text_color(*_lc)
-                            _rpdf.cell(28, 5, f"Iter {_h['attempt']}")
-                            _rpdf.set_font("Helvetica","",9)
+                            _rpdf.set_xy(_rpdf.l_margin, _iy + 1)
+                            _rpdf.cell(_lbl_w, _bar_h, f"Iter {_h['attempt']}", ln=False)
+                            # Bar background
+                            _bx = _rpdf.l_margin + _lbl_w
+                            _rpdf.set_fill_color(230,230,230)
+                            _rpdf.rect(_bx, _iy+1, _bar_max_w, _bar_h, style="F")
+                            # Bar fill
+                            _rpdf.set_fill_color(*_lc)
+                            _rpdf.rect(_bx, _iy+1, _bar_max_w * min(_ls, 1.0), _bar_h, style="F")
+                            # Score label
                             _rpdf.set_text_color(30,30,30)
-                            _rpdf.multi_cell(_cw-28, 5,
-                                f"LTN {_ls:.4f}  |  {_np}/{_nt} rules passed", align="L")
+                            _rpdf.set_font("Helvetica","",8)
+                            _rpdf.set_xy(_bx + _bar_max_w + 3, _iy + 1)
+                            _rpdf.cell(_pct_w, _bar_h, f"{_ls:.4f}  {_np}/{_nt}", ln=False)
+                            _rpdf.ln(_bar_h + _bar_gap)
+
+                            # Violations that triggered the next rewrite
                             _viols = _h.get("violations",[])
-                            if _viols:
-                                for _v in _viols:
-                                    _rpdf.set_font("Helvetica","",8)
-                                    _rpdf.set_text_color(180,80,80)
-                                    _rpdf.set_x(_rpdf.l_margin+8)
-                                    _rpdf.multi_cell(_cw-8, 4,
-                                        _rsan(f"  FAIL: {_v.get('rule_display','')}"), align="L")
+                            if _viols and not _is_last:
+                                for _v in _viols[:3]:  # cap at 3 to save space
+                                    if _rpdf.get_y() > _rpdf.h - 18: _rpdf.add_page()
+                                    _rpdf.set_font("Helvetica","",7)
+                                    _rpdf.set_text_color(200,80,80)
+                                    _rpdf.set_x(_rpdf.l_margin + _lbl_w + 2)
+                                    _rpdf.multi_cell(_cw - _lbl_w - 2, 4,
+                                        _rsan(f"  Rewrite trigger: {_v.get('rule_display','')} (score {_v.get('compliance_score',0):.2f})"),
+                                        align="L")
+                            elif _is_last:
+                                _rpdf.set_font("Helvetica","I",7)
+                                _rpdf.set_text_color(55,180,130) if _passed else _rpdf.set_text_color(220,100,95)
+                                _rpdf.set_x(_rpdf.l_margin + _lbl_w + 2)
+                                _rpdf.cell(_cw - _lbl_w, 4,
+                                    "Final -- PASSED" if _passed else "Final -- DID NOT PASS",
+                                    ln=True)
                             _rpdf.ln(1)
 
-                    # Sources
+                        # Threshold reference line note
+                        _rpdf.set_font("Helvetica","I",7)
+                        _rpdf.set_text_color(120,120,120)
+                        _rpdf.set_x(_rpdf.l_margin)
+                        _rpdf.cell(_cw, 4,
+                            f"Pass threshold: {_thresh:.2f} | Bars show LTN score (0.0 -- 1.0)",
+                            ln=True)
+                        _rpdf.ln(2)
+
+                    # Sources with URLs
                     if _sources:
+                        if _rpdf.get_y() > _rpdf.h - 50: _rpdf.add_page()
                         _rpdf.ln(2)
                         _rpdf.set_font("Helvetica","B",11)
                         _rpdf.set_text_color(46,117,182)
+                        _rpdf.set_x(_rpdf.l_margin)
                         _rpdf.cell(_cw, 6, "Research Sources Used", ln=True)
-                        _rpdf.set_line_width(0.3)
+                        _rpdf.set_draw_color(46,117,182); _rpdf.set_line_width(0.3)
                         _rpdf.line(_rpdf.l_margin, _rpdf.get_y(),
                                    _rpdf.w-_rpdf.r_margin, _rpdf.get_y())
                         _rpdf.ln(3)
                         for _src in _sources:
+                            if _rpdf.get_y() > _rpdf.h - 40: _rpdf.add_page()
+                            _rpdf.set_x(_rpdf.l_margin)
                             _rpdf.set_font("Helvetica","B",9)
                             _rpdf.set_text_color(30,30,30)
                             _rpdf.multi_cell(_cw, 5,
                                 _rsan(f"{_src.get('source_name','')} -- {_src.get('title','')}"),
                                 align="L")
+                            # Context snippet
+                            _rpdf.set_x(_rpdf.l_margin)
                             _rpdf.set_font("Helvetica","",8)
                             _rpdf.set_text_color(90,90,90)
                             _rpdf.multi_cell(_cw, 4,
                                 _rsan(_src.get("context","")[:200]+"..."), align="L")
+                            # URL — print in blue monospace
+                            _ref = _src.get("reference","") or _src.get("source","") or ""
+                            if _ref and _ref not in ("None",""):
+                                _rpdf.set_x(_rpdf.l_margin)
+                                _rpdf.set_font("Courier","",7)
+                                _rpdf.set_text_color(46,117,182)
+                                # Truncate very long URLs for readability
+                                _url_disp = _ref[:90] + ("..." if len(_ref)>90 else "")
+                                _rpdf.multi_cell(_cw, 4, _url_disp, align="L")
                             _rpdf.ln(3)
 
                     _rpt_pdf_bytes = bytes(_rpdf.output())
