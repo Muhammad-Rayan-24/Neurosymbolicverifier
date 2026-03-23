@@ -704,20 +704,71 @@ with col_left:
                                value=0.80, step=0.05, key="ltn_threshold_slider",
                                help="Score above this = all constraints satisfied")
 
-    # Web research toggle
+    # ── Modular Research Sources ─────────────────────────────────────────────
+    st.markdown('<div class="section-label">🔍 Research Sources</div>', unsafe_allow_html=True)
     _has_doc = bool(st.session_state.get("doc_upload") or
                     st.session_state.get("existing_draft","").strip())
-    use_web_research = st.checkbox(
-        "🌐 Web research (Wikipedia + DuckDuckGo)",
-        value=not _has_doc,
-        key="use_web_research",
-        help="Disabled automatically when a document is uploaded. Enable to add rules from web sources."
-    )
-    if _has_doc and use_web_research:
-        st.caption(
-            "⚠️ Document loaded + web research on. Research uses your prompt as query, "
-            "not the document — may pull unrelated rules. Disable for pure document tasks."
+
+    # Row 1: Wikipedia + DuckDuckGo (auto-off when doc present)
+    _src_r1c1, _src_r1c2 = st.columns(2)
+    with _src_r1c1:
+        use_wikipedia = st.checkbox("📖 Wikipedia", value=not _has_doc,
+                                    key="use_wikipedia",
+                                    help="Search Wikipedia and derive rules from the best matching article.")
+    with _src_r1c2:
+        use_duckduckgo = st.checkbox("🦆 DuckDuckGo (instant)", value=not _has_doc,
+                                     key="use_duckduckgo",
+                                     help="DuckDuckGo instant answer API — fast topic snippet.")
+
+    # Row 2: Full web search options
+    _src_r2c1, _src_r2c2 = st.columns(2)
+    with _src_r2c1:
+        use_web_search = st.checkbox(
+            "🌍 Web Search (DuckDuckGo, top 5)",
+            value=False, key="use_web_search_full",
+            help="Full web search via DuckDuckGo — fetches and reads top 5 pages. Prioritises authoritative sources (.gov .edu arXiv Reuters Nature). Requires: pip install duckduckgo-search"
         )
+    with _src_r2c2:
+        use_google_search = st.checkbox(
+            "🔍 Google Search (top 5)",
+            value=False, key="use_google_search",
+            help="Google Custom Search JSON API — fetches and reads top 5 results. Requires a Google API Key + Custom Search Engine ID."
+        )
+
+    # Google credentials (shown when Google selected)
+    if use_google_search:
+        _gc1, _gc2 = st.columns(2)
+        with _gc1:
+            st.text_input("Google API Key", type="password", placeholder="AIza...",
+                          key="google_api_key",
+                          help="Create at console.developers.google.com → Custom Search JSON API")
+        with _gc2:
+            st.text_input("Search Engine ID (cx)", placeholder="abc123:xyz...",
+                          key="google_cx",
+                          help="Create at programmablesearchengine.google.com — set to search the whole web")
+        st.caption("🔍 Google Search fetches top 5 results from across the web.")
+
+    # Row 3: Custom URLs
+    use_custom_urls = st.checkbox("🔗 Custom URLs / Online PDFs", value=False,
+                                  key="use_custom_urls",
+                                  help="Fetch specific URLs and extract text. Supports HTML pages and online PDFs.")
+    _custom_url_list = []
+    if use_custom_urls:
+        _url_raw = st.text_area(
+            "custom_urls", label_visibility="collapsed",
+            placeholder="One URL per line:\nhttps://arxiv.org/pdf/2310.12345.pdf\nhttps://en.wikipedia.org/wiki/...",
+            height=70, key="custom_urls_input"
+        )
+        _custom_url_list = [u.strip() for u in _url_raw.splitlines() if u.strip().startswith("http")]
+        if _custom_url_list:
+            st.caption(f"✅ {len(_custom_url_list)} URL(s) queued — fetched concurrently at run time")
+
+    use_web_research = (use_wikipedia or use_duckduckgo or use_web_search
+                        or use_google_search or bool(_custom_url_list))
+
+    if _has_doc and use_web_research:
+        st.caption("⚠️ Document loaded + web research on. Research uses your prompt — "
+                   "may pull unrelated rules. Disable all sources for pure document tasks.")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -969,7 +1020,13 @@ with col_right:
             if do_rules:    futures["rules"]    = pool.submit(_run_rule_parse)
 
             msgs = []
-            if "research" in futures: msgs.append("M4 searching Wikipedia & DuckDuckGo")
+            if "research" in futures:
+                _srcs = [k for k,v in [
+                    ("Wikipedia",_research_config.get("wikipedia")),
+                    ("DuckDuckGo",_research_config.get("duckduckgo")),
+                    ("Web Search",_research_config.get("web_search")),
+                ] if v] + ([f"{len(_research_config.get('custom_urls',[]))} URL(s)"] if _research_config.get("custom_urls") else [])
+                msgs.append("M4 researching: " + ", ".join(_srcs))
             if "rules"    in futures: msgs.append(f"M2 parsing {len(rules_snapshot)} rule(s)")
             if msgs: status.info(" · ".join(msgs) + "…")
 
@@ -979,8 +1036,8 @@ with col_right:
                     results["sources"] = source_results
                 except Exception as e:
                     st.warning(f"M4 research failed (non-fatal): {e}")
-            elif not _web_research_enabled:
-                _skip_reason = "document mode" if _doc_present else "web research disabled"
+            elif not _any_research:
+                _skip_reason = "document mode" if _doc_present else "all sources disabled"
                 status.info(f"📄 Skipping web research ({_skip_reason}) — rules from user + document only.")
 
             if "rules" in futures:
