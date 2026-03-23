@@ -995,21 +995,63 @@ with col_right:
         memory_context   = []
         _web_research_enabled = st.session_state.get("use_web_research", True)
         _doc_present = bool(existing_draft.strip())
+
+        # Safe defaults — prevent NameError if session state keys are missing
+        # (can happen on first load or version mismatch during deployment)
+        if "_research_config" not in dir():
+            _research_config = {
+                "wikipedia"      : st.session_state.get("use_wikipedia", not _doc_present),
+                "duckduckgo"     : st.session_state.get("use_duckduckgo", not _doc_present),
+                "google"         : st.session_state.get("use_google_search", False),
+                "google_api_key" : st.session_state.get("google_api_key", "").strip(),
+                "google_cx"      : st.session_state.get("google_cx", "").strip(),
+                "web_search"     : st.session_state.get("use_web_search_full", False),
+                "custom_urls"    : [u.strip() for u in
+                                    st.session_state.get("custom_urls_input","").splitlines()
+                                    if u.strip().startswith("http")],
+            }
+        if "_any_research" not in dir():
+            _any_research = any([
+                _research_config.get("wikipedia", True),
+                _research_config.get("duckduckgo", True),
+                _research_config.get("google", False),
+                _research_config.get("web_search", False),
+                bool(_research_config.get("custom_urls", [])),
+            ])
+        _research_config = {
+            "wikipedia"  : st.session_state.get("use_wikipedia", not _doc_present),
+            "duckduckgo" : st.session_state.get("use_duckduckgo", not _doc_present),
+            "google"         : st.session_state.get("use_google_search", False),
+            "google_api_key" : st.session_state.get("google_api_key", "").strip(),
+            "google_cx"      : st.session_state.get("google_cx", "").strip(),
+            "web_search"     : st.session_state.get("use_web_search_full", False),
+            "custom_urls": [u.strip() for u in
+                            st.session_state.get("custom_urls_input","").splitlines()
+                            if u.strip().startswith("http")],
+        }
+        _any_research = any([
+            _research_config["wikipedia"],
+            _research_config["duckduckgo"],
+            _research_config["google"],
+            _research_config["web_search"],
+            bool(_research_config["custom_urls"]),
+        ])
         do_research = (
             has_m4
             and mode in ["🔬 Full", "🌐 Research+Gen"]
-            and _web_research_enabled
+            and _any_research
         )
         do_rules    = bool(rules_snapshot)
 
         prog.progress(8, text="⚡ Research & rule parsing in parallel…")
 
         def _run_research():
-            # Always search using the user prompt, never the document text.
-            # If there is no prompt (doc-only task), skip research.
             if not user_prompt.strip():
                 return []
-            return m4.research_all_sources(user_prompt.strip(), api_key=api_key, llm_config=llm_config)
+            return m4.research_all_sources(
+                user_prompt.strip(), api_key=api_key,
+                llm_config=llm_config, research_config=_research_config,
+            )
 
         def _run_rule_parse():
             return m2.parse_rules_parallel(rules_snapshot, api_key, llm_config=llm_config)
@@ -1021,12 +1063,14 @@ with col_right:
 
             msgs = []
             if "research" in futures:
+                _rc = _research_config if "_research_config" in dir() else {}
                 _srcs = [k for k,v in [
-                    ("Wikipedia",_research_config.get("wikipedia")),
-                    ("DuckDuckGo",_research_config.get("duckduckgo")),
-                    ("Web Search",_research_config.get("web_search")),
-                ] if v] + ([f"{len(_research_config.get('custom_urls',[]))} URL(s)"] if _research_config.get("custom_urls") else [])
-                msgs.append("M4 researching: " + ", ".join(_srcs))
+                    ("Wikipedia",  _rc.get("wikipedia")),
+                    ("DuckDuckGo", _rc.get("duckduckgo")),
+                    ("Google",     _rc.get("google")),
+                    ("Web Search", _rc.get("web_search")),
+                ] if v] + ([f"{len(_rc.get('custom_urls',[]))} URL(s)"] if _rc.get("custom_urls") else [])
+                msgs.append("M4 researching: " + (", ".join(_srcs) if _srcs else "sources"))
             if "rules"    in futures: msgs.append(f"M2 parsing {len(rules_snapshot)} rule(s)")
             if msgs: status.info(" · ".join(msgs) + "…")
 
@@ -1036,7 +1080,7 @@ with col_right:
                     results["sources"] = source_results
                 except Exception as e:
                     st.warning(f"M4 research failed (non-fatal): {e}")
-            elif not _any_research:
+            elif not _any_research if "_any_research" in dir() else True:
                 _skip_reason = "document mode" if _doc_present else "all sources disabled"
                 status.info(f"📄 Skipping web research ({_skip_reason}) — rules from user + document only.")
 
