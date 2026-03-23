@@ -2698,7 +2698,7 @@ with col_right:
                                       else ((220,180,80) if _comp >= 0.5
                                             else (220,100,95)))
                             _disp  = _rsan(_r.get("rule_display",""))[:52]
-                            _meth  = "S" if _r.get("symbolic_check_used") else "AI"
+                            _meth  = "[sym]" if _r.get("symbolic_check_used") else "[sem]"
                             _stat  = "PASS" if _r.get("satisfies") else ("PART" if _comp>=0.5 else "FAIL")
 
                             _iy = _rpdf.get_y()
@@ -2737,7 +2737,7 @@ with col_right:
                         _rpdf.set_text_color(120,120,120)
                         _rpdf.set_x(_rpdf.l_margin)
                         _rpdf.cell(_cw, 4,
-                            "Bar width = compliance score (0-1)  |  S = symbolic check, AI = semantic  |"
+                            "Bar width = compliance score (0-1)  |  [sym] = symbolic math check, [sem] = AI semantic check  |"
                             "  Green >= 0.80, Amber >= 0.50, Red < 0.50")
                         _rpdf.ln(6)
                     if _history and len(_history) >= 1:
