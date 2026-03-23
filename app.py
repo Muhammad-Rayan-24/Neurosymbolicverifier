@@ -482,6 +482,90 @@ def _dedup_rules(rules: list) -> list:
     return deduped
 
 
+def _detect_contradictions(rules: list) -> list:
+    """
+    Detect logically impossible rule pairs on the same variable.
+    Returns list of contradiction dicts: {rule_a, rule_b, reason}.
+
+    Cases checked:
+      - upper_bound < lower_bound on same variable (e.g. <=400 AND >=600)
+      - lower_bound > upper_bound on same variable
+      - in_range where threshold_low > threshold_high
+      - == X AND == Y (different values, same variable)
+      - == X AND < X  (exact value but also strictly less than it)
+      - == X AND > X  (exact value but also strictly greater than it)
+    """
+    contradictions = []
+    # Group rules by variable name
+    by_var: dict = {}
+    for r in rules:
+        v = r.get("variable", "").strip()
+        if v:
+            by_var.setdefault(v, []).append(r)
+
+    for var, group in by_var.items():
+        if len(group) < 2:
+            continue
+        for i, ra in enumerate(group):
+            for rb in group[i+1:]:
+                oa, ob = ra.get("operator"), rb.get("operator")
+                ta, tb = ra.get("threshold"), rb.get("threshold")
+                la, lb = ra.get("threshold_low"), rb.get("threshold_low")
+                ha, hb = ra.get("threshold_high"), rb.get("threshold_high")
+
+                try:
+                    # Upper bound < lower bound
+                    if oa in ("<","<=") and ob in (">",">=") and ta is not None and tb is not None:
+                        limit_a = float(ta)
+                        limit_b = float(tb)
+                        if oa == "<" and ob == ">" and limit_a <= limit_b:
+                            contradictions.append({"rule_a": ra, "rule_b": rb,
+                                "reason": f"Impossible: {var} < {limit_a} AND {var} > {limit_b}"})
+                        elif oa == "<=" and ob == ">=" and limit_a < limit_b:
+                            contradictions.append({"rule_a": ra, "rule_b": rb,
+                                "reason": f"Impossible: {var} <= {limit_a} AND {var} >= {limit_b}"})
+                        elif oa == "<" and ob == ">=" and limit_a <= limit_b:
+                            contradictions.append({"rule_a": ra, "rule_b": rb,
+                                "reason": f"Impossible: {var} < {limit_a} AND {var} >= {limit_b}"})
+                        elif oa == "<=" and ob == ">" and limit_a <= limit_b:
+                            contradictions.append({"rule_a": ra, "rule_b": rb,
+                                "reason": f"Impossible: {var} <= {limit_a} AND {var} > {limit_b}"})
+
+                    # == X AND == Y (different exact values)
+                    if oa == "==" and ob == "==" and ta is not None and tb is not None:
+                        if abs(float(ta) - float(tb)) > 1e-9:
+                            contradictions.append({"rule_a": ra, "rule_b": rb,
+                                "reason": f"Impossible: {var} == {ta} AND {var} == {tb}"})
+
+                    # == X AND strictly outside X
+                    if oa == "==" and ta is not None and tb is not None:
+                        if ob == "<" and float(ta) >= float(tb):
+                            contradictions.append({"rule_a": ra, "rule_b": rb,
+                                "reason": f"Impossible: {var} == {ta} AND {var} < {tb}"})
+                        if ob == ">" and float(ta) <= float(tb):
+                            contradictions.append({"rule_a": ra, "rule_b": rb,
+                                "reason": f"Impossible: {var} == {ta} AND {var} > {tb}"})
+
+                    # in_range where bounds are inverted
+                    if oa == "in_range" and la is not None and ha is not None:
+                        if float(la) > float(ha):
+                            contradictions.append({"rule_a": ra, "rule_b": ra,
+                                "reason": f"Impossible range: {var} in [{la}, {ha}] — low > high"})
+
+                except (TypeError, ValueError):
+                    pass
+
+    # Deduplicate (same pair may be found twice)
+    seen_pairs, unique = set(), []
+    for c in contradictions:
+        key = frozenset([c["rule_a"].get("variable",""), c["rule_b"].get("variable",""),
+                          c["reason"]])
+        if key not in seen_pairs:
+            seen_pairs.add(key)
+            unique.append(c)
+    return unique
+
+
 def _diff_sentences(text_a: str, text_b: str) -> str:
     """Return a simple word-level diff summary between two drafts."""
     lines_a = text_a.split("\n")
@@ -924,6 +1008,72 @@ with col_right:
         structured_rules = _dedup_rules(all_rules)
         results["structured_rules"] = structured_rules
 
+        # ── Contradiction check + auto-resolution ────────────────────────
+        _contradictions = _detect_contradictions(structured_rules)
+        results["contradictions"] = _contradictions
+
+        if _contradictions:
+            status.warning(
+                f"⚠️ {len(_contradictions)} contradiction(s) detected — auto-resolving…"
+            )
+            _resolved_log = []
+            _rules_to_remove = set()
+
+            for _ctr in _contradictions:
+                _ra = _ctr["rule_a"]
+                _rb = _ctr["rule_b"]
+                _reason = _ctr["reason"]
+
+                # Strategy: keep the rule from the user (source_name == "User")
+                # and remove the research-derived conflicting rule.
+                # If both are user rules, keep the more permissive one
+                # (upper bound preferred over lower when they conflict)
+                # and log the resolution.
+                _ra_user = _ra.get("source_name","") == "User"
+                _rb_user = _rb.get("source_name","") == "User"
+
+                if _ra_user and not _rb_user:
+                    # Remove the research rule
+                    _remove_idx = id(_rb)
+                    _keep = _ra
+                    _drop = _rb
+                elif _rb_user and not _ra_user:
+                    _remove_idx = id(_ra)
+                    _keep = _rb
+                    _drop = _ra
+                else:
+                    # Both user rules or both research — remove the stricter one
+                    # (the one with the smaller allowed range / higher lower-bound)
+                    _oa = _ra.get("operator","")
+                    _ob = _rb.get("operator","")
+                    if _oa in ("<","<="):
+                        # ra is upper bound — keep it (it allows more)
+                        _remove_idx = id(_rb)
+                        _keep = _ra; _drop = _rb
+                    else:
+                        _remove_idx = id(_ra)
+                        _keep = _rb; _drop = _ra
+
+                _rules_to_remove.add(id(_drop))
+                _resolved_log.append(
+                    f"Removed '{_drop.get('display',_drop.get('original','?'))}' "
+                    f"(conflicts with '{_keep.get('display',_keep.get('original','?'))}') "
+                    f"— {_reason}"
+                )
+
+            # Apply removals
+            _before = len(structured_rules)
+            structured_rules = [r for r in structured_rules
+                                 if id(r) not in _rules_to_remove]
+            results["structured_rules"] = structured_rules
+            results["contradictions_resolved"] = _resolved_log
+
+            _removed_n = _before - len(structured_rules)
+            status.info(
+                f"✅ Auto-resolved {_removed_n} contradicting rule(s). "
+                f"Removed: " + "; ".join(_resolved_log)
+            )
+
         # ── M3: Store in Qdrant ───────────────────────────────────────────────
         brain_records = {"rules": [], "sources": [], "audit": []}
         if has_m3 and qdrant_client:
@@ -1186,6 +1336,17 @@ with col_right:
     # ══════════════════════════════════════════════════════════════════════════
     if st.session_state.results:
         res  = st.session_state.results
+
+        # Show contradiction warnings at the top if any were found
+        _ctrs = res.get("contradictions", [])
+        if _ctrs:
+            for _ctr in _ctrs:
+                st.warning(
+                    f"⚠️ **Contradicting rules detected:** {_ctr['reason']}  \n"
+                    f"Rule A: *{_ctr['rule_a'].get('display','')}*  ·  "
+                    f"Rule B: *{_ctr['rule_b'].get('display','')}*  \n"
+                    f"These rules cannot both be satisfied — consider revising them."
+                )
 
         # Build a short topic slug for filenames from the user prompt
         def _make_slug(text: str, max_len: int = 40) -> str:
@@ -2147,6 +2308,156 @@ with col_right:
                             f"Pass threshold: {_thresh:.2f} | Bars show LTN score (0.0 -- 1.0)",
                             ln=True)
                         _rpdf.ln(2)
+
+                    # ── Column chart: LTN score per iteration ─────────────────
+                    if _history and len(_history) >= 1:
+                        if _rpdf.get_y() > _rpdf.h - 80: _rpdf.add_page()
+                        _rpdf.ln(3)
+                        _rpdf.set_font("Helvetica","B",11)
+                        _rpdf.set_text_color(46,117,182)
+                        _rpdf.set_x(_rpdf.l_margin)
+                        _rpdf.cell(_cw, 6, "LTN Score per Iteration (Column Chart)", ln=True)
+                        _rpdf.set_draw_color(46,117,182); _rpdf.set_line_width(0.3)
+                        _rpdf.line(_rpdf.l_margin, _rpdf.get_y(),
+                                   _rpdf.w-_rpdf.r_margin, _rpdf.get_y())
+                        _rpdf.ln(4)
+
+                        # Chart dimensions
+                        _ch_h    = 55        # chart area height in mm
+                        _ch_w    = _cw - 20  # chart area width
+                        _ch_x    = _rpdf.l_margin + 14  # left offset for y-axis labels
+                        _ch_y    = _rpdf.get_y()
+                        _n_iters = len(_history)
+                        _col_w   = min(20, _ch_w / max(_n_iters, 1))
+                        _gap     = max(2, (_ch_w - _col_w * _n_iters) / max(_n_iters + 1, 1))
+
+                        # Draw y-axis gridlines and labels (0.0, 0.25, 0.5, 0.75, 1.0)
+                        for _yi, _yv in enumerate([0.0, 0.25, 0.5, 0.75, 1.0]):
+                            _gy = _ch_y + _ch_h - _yv * _ch_h
+                            _rpdf.set_draw_color(210,210,210); _rpdf.set_line_width(0.1)
+                            _rpdf.line(_ch_x, _gy, _ch_x + _ch_w, _gy)
+                            # Threshold line in gold
+                            if abs(_yv - _thresh) < 0.13:
+                                _rpdf.set_draw_color(200,169,110); _rpdf.set_line_width(0.4)
+                                _rpdf.line(_ch_x, _ch_y + _ch_h - _thresh * _ch_h,
+                                           _ch_x + _ch_w, _ch_y + _ch_h - _thresh * _ch_h)
+                                _rpdf.set_font("Helvetica","I",6)
+                                _rpdf.set_text_color(170,130,60)
+                                _rpdf.set_xy(_ch_x + _ch_w + 1, _ch_y + _ch_h - _thresh*_ch_h - 2)
+                                _rpdf.cell(12, 4, f"thr {_thresh:.2f}")
+                            _rpdf.set_font("Helvetica","",6)
+                            _rpdf.set_text_color(130,130,130)
+                            _rpdf.set_xy(_rpdf.l_margin, _gy - 2)
+                            _rpdf.cell(12, 4, f"{_yv:.2f}", align="R")
+
+                        # Draw axes
+                        _rpdf.set_draw_color(80,80,80); _rpdf.set_line_width(0.3)
+                        _rpdf.line(_ch_x, _ch_y, _ch_x, _ch_y + _ch_h)            # y-axis
+                        _rpdf.line(_ch_x, _ch_y + _ch_h, _ch_x + _ch_w, _ch_y + _ch_h)  # x-axis
+
+                        # Draw columns
+                        for _ci, _h in enumerate(_history):
+                            _ls  = _h["ltn_score"]
+                            _lc  = (55,180,130) if _ls>=_thresh else ((220,180,80) if _ls>=0.5 else (220,100,95))
+                            _cx  = _ch_x + _gap + _ci * (_col_w + _gap)
+                            _bar_top = _ch_y + _ch_h - _ls * _ch_h
+                            _rpdf.set_fill_color(*_lc)
+                            _rpdf.set_draw_color(200,200,200); _rpdf.set_line_width(0.1)
+                            _rpdf.rect(_cx, _bar_top, _col_w, _ls * _ch_h,
+                                       style="FD" if _ls > 0 else "D")
+                            # Score label above bar
+                            _rpdf.set_font("Helvetica","B",6)
+                            _rpdf.set_text_color(*_lc)
+                            _rpdf.set_xy(_cx - 1, _bar_top - 5)
+                            _rpdf.cell(_col_w + 2, 4, f"{_ls:.3f}", align="C")
+                            # Iteration label below x-axis
+                            _rpdf.set_font("Helvetica","",7)
+                            _rpdf.set_text_color(60,60,60)
+                            _rpdf.set_xy(_cx - 1, _ch_y + _ch_h + 1)
+                            _rpdf.cell(_col_w + 2, 4, f"I{_h['attempt']}", align="C")
+
+                        _rpdf.set_xy(_rpdf.l_margin, _ch_y + _ch_h + 8)
+                        _rpdf.set_font("Helvetica","I",7)
+                        _rpdf.set_text_color(120,120,120)
+                        _rpdf.cell(_cw, 4, "Y-axis: LTN score (0-1)  |  Gold line: pass threshold  |  Green = pass, Amber = marginal, Red = fail")
+                        _rpdf.ln(6)
+
+                    # ── Per-iteration explanation ──────────────────────────────
+                    if _history and len(_history) >= 1:
+                        if _rpdf.get_y() > _rpdf.h - 50: _rpdf.add_page()
+                        _rpdf.ln(2)
+                        _rpdf.set_font("Helvetica","B",11)
+                        _rpdf.set_text_color(46,117,182)
+                        _rpdf.set_x(_rpdf.l_margin)
+                        _rpdf.cell(_cw, 6, "Per-Iteration Failure Analysis", ln=True)
+                        _rpdf.set_draw_color(46,117,182); _rpdf.set_line_width(0.3)
+                        _rpdf.line(_rpdf.l_margin, _rpdf.get_y(),
+                                   _rpdf.w-_rpdf.r_margin, _rpdf.get_y())
+                        _rpdf.ln(3)
+
+                        for _h in _history:
+                            if _rpdf.get_y() > _rpdf.h - 35: _rpdf.add_page()
+                            _np   = sum(1 for _r in _h["audit"] if _r.get("satisfies"))
+                            _nt   = len(_h["audit"]) or 1
+                            _ls   = _h["ltn_score"]
+                            _lc   = (55,180,130) if _ls>=_thresh else ((220,180,80) if _ls>=0.5 else (220,100,95))
+                            _viols = _h.get("violations",[])
+                            _is_last = _h["attempt"] == len(_history)
+
+                            # Iteration header
+                            _rpdf.set_x(_rpdf.l_margin)
+                            _rpdf.set_font("Helvetica","B",9)
+                            _rpdf.set_text_color(*_lc)
+                            _outcome = ("PASSED" if (_is_last and _passed)
+                                        else ("FAILED (max iterations)" if _is_last else "TRIGGERED REWRITE"))
+                            _rpdf.cell(22, 5, f"Iter {_h['attempt']}")
+                            _rpdf.set_font("Helvetica","",9)
+                            _rpdf.set_text_color(30,30,30)
+                            _rpdf.multi_cell(_cw-22, 5,
+                                _rsan(f"LTN {_ls:.4f} | {_np}/{_nt} rules | {_outcome}"),
+                                align="L")
+
+                            if not _viols:
+                                _rpdf.set_x(_rpdf.l_margin + 6)
+                                _rpdf.set_font("Helvetica","I",8)
+                                _rpdf.set_text_color(55,180,130)
+                                _rpdf.cell(_cw-6, 4, "All rules satisfied.", ln=True)
+                            else:
+                                for _v in _viols:
+                                    if _rpdf.get_y() > _rpdf.h - 22: _rpdf.add_page()
+                                    _vd   = _rsan(_v.get("rule_display",""))
+                                    _ve   = _rsan(_v.get("explanation",""))
+                                    _vs   = _v.get("compliance_score",0)
+                                    _vmeth = "Symbolic" if _v.get("symbolic_check_used") else "Semantic"
+                                    _vextr = _rsan(str(_v.get("extracted_value_raw",""))[:80])
+
+                                    # Rule name
+                                    _rpdf.set_x(_rpdf.l_margin + 6)
+                                    _rpdf.set_font("Helvetica","B",8)
+                                    _rpdf.set_text_color(200,80,80)
+                                    _rpdf.multi_cell(_cw-6, 4,
+                                        _rsan(f"FAIL ({_vs:.2f}) -- {_vd}"), align="L")
+                                    # Why it failed
+                                    _rpdf.set_x(_rpdf.l_margin + 10)
+                                    _rpdf.set_font("Helvetica","",7)
+                                    _rpdf.set_text_color(80,80,80)
+                                    _rpdf.multi_cell(_cw-10, 4,
+                                        _rsan(f"Found: {_vextr}"), align="L")
+                                    _rpdf.set_x(_rpdf.l_margin + 10)
+                                    _rpdf.multi_cell(_cw-10, 4,
+                                        _rsan(f"Why: {_ve}"), align="L")
+                                    _rpdf.set_x(_rpdf.l_margin + 10)
+                                    _rpdf.set_text_color(120,120,120)
+                                    _rpdf.cell(_cw-10, 4,
+                                        _rsan(f"Method: {_vmeth}"), ln=True)
+                                    if not _is_last:
+                                        _rpdf.set_x(_rpdf.l_margin + 10)
+                                        _rpdf.set_font("Helvetica","I",7)
+                                        _rpdf.set_text_color(150,100,50)
+                                        _rpdf.cell(_cw-10, 4,
+                                            "-> System rewrote draft based on this failure", ln=True)
+                                    _rpdf.ln(1)
+                            _rpdf.ln(2)
 
                     # Sources with URLs
                     if _sources:
