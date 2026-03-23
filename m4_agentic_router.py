@@ -1,4 +1,3 @@
-import anthropic
 import wikipedia
 import urllib.request
 import urllib.parse
@@ -20,44 +19,63 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 #    deduplication against Wikipedia result.
 # ============================================================
 
-_MODEL        = "claude-sonnet-4-5"
 _TOPIC_CACHE  : dict = {}
 _CLIENT_CACHE : dict = {}
 
 
-def _get_client(api_key: str) -> anthropic.Anthropic:
-    key = (api_key or "").strip()
-    if not key:
-        raise ValueError("Anthropic API key is empty.")
-    h = hashlib.md5(key.encode()).hexdigest()
-    if h not in _CLIENT_CACHE:
-        _CLIENT_CACHE[h] = anthropic.Anthropic(api_key=key)
-    return _CLIENT_CACHE[h]
+def _call_llm(prompt: str, api_key: str, llm_config: dict = None,
+              max_tokens: int = 256) -> str:
+    """Universal dispatcher — same providers as m2."""
+    cfg      = llm_config or {"provider":"anthropic","model":"claude-sonnet-4-5","api_key":api_key}
+    provider = cfg.get("provider","anthropic").lower()
+    model    = cfg.get("model","claude-sonnet-4-5")
+    key      = cfg.get("api_key", api_key or "").strip()
+    cache_k  = hashlib.md5((provider+model+key).encode()).hexdigest()
+
+    if provider == "anthropic":
+        import anthropic as _ant
+        if cache_k not in _CLIENT_CACHE:
+            _CLIENT_CACHE[cache_k] = _ant.Anthropic(api_key=key)
+        r = _CLIENT_CACHE[cache_k].messages.create(
+            model=model, max_tokens=max_tokens,
+            messages=[{"role":"user","content":prompt}])
+        return r.content[0].text
+
+    elif provider == "openai":
+        import openai as _oai
+        if cache_k not in _CLIENT_CACHE:
+            _CLIENT_CACHE[cache_k] = _oai.OpenAI(api_key=key)
+        r = _CLIENT_CACHE[cache_k].chat.completions.create(
+            model=model, max_tokens=max_tokens,
+            messages=[{"role":"user","content":prompt}])
+        return r.choices[0].message.content
+
+    elif provider == "google":
+        import google.generativeai as _genai
+        _genai.configure(api_key=key)
+        return _genai.GenerativeModel(model).generate_content(prompt).text
+
+    raise ValueError(f"Unknown provider: {provider}")
 
 
+# Legacy alias
 def _claude(api_key: str, prompt: str, max_tokens: int = 256) -> str:
-    client   = _get_client(api_key)
-    response = client.messages.create(
-        model      = _MODEL,
-        max_tokens = max_tokens,
-        messages   = [{"role": "user", "content": prompt}],
-    )
-    return response.content[0].text
+    return _call_llm(prompt, api_key, None, max_tokens)
 
 
 # ── PUBLIC ENTRY POINT ────────────────────────────────────────────────────────
 
-def research_all_sources(query_text: str, api_key: str = None) -> list:
+def research_all_sources(query_text: str, api_key: str = None, llm_config: dict = None) -> list:
     """
     Search Wikipedia AND DuckDuckGo concurrently.
     Returns list of {source_name, context, reference, title}.
     """
-    search_topic = _extract_search_topic(query_text, api_key)
+    search_topic = _extract_search_topic(query_text, api_key, llm_config)
     print(f"\n[Module 4] Search topic: '{search_topic}'")
 
     t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=2) as pool:
-        wiki_f = pool.submit(_wiki_fetch, search_topic, query_text, api_key)
+        wiki_f = pool.submit(_wiki_fetch, search_topic, query_text, api_key, llm_config)
         ddg_f  = pool.submit(_ddg_fetch, search_topic)
         wiki_result = wiki_f.result()
         ddg_result  = ddg_f.result()
@@ -84,7 +102,7 @@ def research_all_sources(query_text: str, api_key: str = None) -> list:
 
 # ── SOURCE 1: WIKIPEDIA ──────────────────────────────────────────────────────
 
-def _wiki_fetch(search_query: str, original_query: str, api_key: str = None) -> dict:
+def _wiki_fetch(search_query: str, original_query: str, api_key: str = None, llm_config: dict = None) -> dict:
     print(f"\n[Module 4] Wikipedia search: '{search_query}'")
     try:
         candidates = wikipedia.search(search_query, results=5)
@@ -101,7 +119,7 @@ def _wiki_fetch(search_query: str, original_query: str, api_key: str = None) -> 
 
                 # LLM domain gate — catches wrong-domain articles word-overlap misses
                 if api_key and not _llm_domain_check(page.title, summary,
-                                                      search_query, api_key):
+                                                      search_query, api_key, llm_config):
                     print(f"   [M4] Wikipedia: LLM rejected '{page.title}'")
                     continue
 
@@ -113,7 +131,7 @@ def _wiki_fetch(search_query: str, original_query: str, api_key: str = None) -> 
                     page    = wikipedia.page(e.options[0], auto_suggest=False)
                     summary = wikipedia.summary(e.options[0], sentences=5, auto_suggest=False)
                     if api_key and not _llm_domain_check(page.title, summary,
-                                                          search_query, api_key):
+                                                          search_query, api_key, llm_config):
                         continue
                     print(f"   ✅ Wikipedia: {page.url}")
                     return {"context": summary, "reference": page.url, "title": page.title}
@@ -201,7 +219,7 @@ def _failed(reason: str) -> dict:
     return {"context": reason, "reference": "None", "title": "None"}
 
 
-def _extract_search_topic(query_text: str, api_key: str = None) -> str:
+def _extract_search_topic(query_text: str, api_key: str = None, llm_config: dict = None) -> str:
     """Extract 3-5 word search topic. Cached per query."""
     cache_key = hashlib.md5(query_text.strip().lower().encode()).hexdigest()
     if cache_key in _TOPIC_CACHE:
@@ -215,7 +233,7 @@ def _extract_search_topic(query_text: str, api_key: str = None) -> str:
                 f'Return ONLY the search query string, no explanation, no quotes.\n\n'
                 f'Request: "{query_text}"\n\nSearch query:'
             )
-            result = _claude(api_key, prompt, max_tokens=32)
+            result = _call_llm(prompt, api_key, llm_config, max_tokens=32)
             result = result.replace('"', "").replace("'", "").strip()[:60]
             _TOPIC_CACHE[cache_key] = result
             return result
@@ -236,7 +254,7 @@ def _simple_clean(q: str) -> str:
     return " ".join(w for w in q.split() if len(w) > 2)[:60]
 
 
-def _llm_domain_check(title: str, summary: str, query: str, api_key: str) -> bool:
+def _llm_domain_check(title: str, summary: str, query: str, api_key: str, llm_config: dict = None) -> bool:
     """
     Ask Claude whether a Wikipedia article is domain-relevant to the query.
     Only rejects articles where the domain is CLEARLY wrong — e.g. a music
@@ -255,7 +273,7 @@ def _llm_domain_check(title: str, summary: str, query: str, api_key: str) -> boo
             f'If the article is even tangentially related to the query topic, answer "no".\n'
             f'Answer ONLY "yes" (reject) or "no" (accept).'
         )
-        answer = _claude(api_key, prompt, max_tokens=10)
+        answer = _call_llm(prompt, api_key, llm_config, max_tokens=10)
         # "yes" means clearly different domain → reject
         # "no" means same or related domain → accept
         return not answer.strip().lower().startswith("yes")
