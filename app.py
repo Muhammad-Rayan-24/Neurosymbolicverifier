@@ -2669,7 +2669,77 @@ with col_right:
                         _rpdf.cell(_cw, 4, "Y-axis: LTN score (0-1)  |  Gold line: pass threshold  |  Green = pass, Amber = marginal, Red = fail")
                         _rpdf.ln(6)
 
-                    # ── Per-iteration explanation ──────────────────────────────
+                    # ── Chart 3: Rule Compliance Grid ──────────────────────────
+                    # Horizontal mini-bar for each rule — instant visual scan
+                    # of which rules passed / marginal / failed.
+                    if _audit:
+                        if _rpdf.get_y() > _rpdf.h - 60: _rpdf.add_page()
+                        _rpdf.ln(3)
+                        _rpdf.set_font("Helvetica","B",11)
+                        _rpdf.set_text_color(46,117,182)
+                        _rpdf.set_x(_rpdf.l_margin)
+                        _rpdf.cell(_cw, 6,
+                            f"Rule Compliance Grid ({len(_audit)} rules)", ln=True)
+                        _rpdf.set_draw_color(46,117,182); _rpdf.set_line_width(0.3)
+                        _rpdf.line(_rpdf.l_margin, _rpdf.get_y(),
+                                   _rpdf.w-_rpdf.r_margin, _rpdf.get_y())
+                        _rpdf.ln(3)
+
+                        _rg_bar_w   = _cw * 0.38   # width of the bar area
+                        _rg_lbl_w   = _cw * 0.52   # width of rule label
+                        _rg_pct_w   = _cw * 0.08   # width of score text
+                        _rg_row_h   = 5.5
+
+                        for _ri, _r in enumerate(_audit):
+                            if _rpdf.get_y() > _rpdf.h - 14: _rpdf.add_page()
+                            _comp  = _r.get("compliance_score",
+                                            1.0 if _r.get("satisfies") else 0.0)
+                            _col   = ((55,180,130) if _comp >= 0.8
+                                      else ((220,180,80) if _comp >= 0.5
+                                            else (220,100,95)))
+                            _disp  = _rsan(_r.get("rule_display",""))[:52]
+                            _meth  = "S" if _r.get("symbolic_check_used") else "AI"
+                            _stat  = "PASS" if _r.get("satisfies") else ("PART" if _comp>=0.5 else "FAIL")
+
+                            _iy = _rpdf.get_y()
+
+                            # Rule number + method tag
+                            _rpdf.set_xy(_rpdf.l_margin, _iy)
+                            _rpdf.set_font("Helvetica","B",6.5)
+                            _rpdf.set_text_color(*_col)
+                            _rpdf.cell(10, _rg_row_h, f"R{_ri+1}", ln=False)
+
+                            # Rule label
+                            _rpdf.set_font("Helvetica","",7)
+                            _rpdf.set_text_color(50,50,50)
+                            _rpdf.set_xy(_rpdf.l_margin + 10, _iy)
+                            _rpdf.cell(_rg_lbl_w - 10, _rg_row_h, _disp, ln=False)
+
+                            # Bar background
+                            _bx = _rpdf.l_margin + _rg_lbl_w
+                            _rpdf.set_fill_color(225,225,225)
+                            _rpdf.rect(_bx, _iy+1, _rg_bar_w, _rg_row_h-2, style="F")
+
+                            # Bar fill
+                            _rpdf.set_fill_color(*_col)
+                            _rpdf.rect(_bx, _iy+1, _rg_bar_w*min(_comp,1.0),
+                                       _rg_row_h-2, style="F")
+
+                            # Score + method
+                            _rpdf.set_font("Helvetica","B",6.5)
+                            _rpdf.set_text_color(30,30,30)
+                            _rpdf.set_xy(_bx + _rg_bar_w + 2, _iy)
+                            _rpdf.cell(_rg_pct_w, _rg_row_h,
+                                f"{_comp:.2f} {_meth}", ln=True)
+
+                        _rpdf.ln(2)
+                        _rpdf.set_font("Helvetica","I",7)
+                        _rpdf.set_text_color(120,120,120)
+                        _rpdf.set_x(_rpdf.l_margin)
+                        _rpdf.cell(_cw, 4,
+                            "Bar width = compliance score (0-1)  |  S = symbolic check, AI = semantic  |"
+                            "  Green >= 0.80, Amber >= 0.50, Red < 0.50")
+                        _rpdf.ln(6)
                     if _history and len(_history) >= 1:
                         if _rpdf.get_y() > _rpdf.h - 50: _rpdf.add_page()
                         _rpdf.ln(2)
@@ -2691,7 +2761,7 @@ with col_right:
                             _viols = _h.get("violations",[])
                             _is_last = _h["attempt"] == len(_history)
 
-                            # Iteration header
+                            # ── Iteration header ─────────────────────────────
                             _rpdf.set_x(_rpdf.l_margin)
                             _rpdf.set_font("Helvetica","B",9)
                             _rpdf.set_text_color(*_lc)
@@ -2700,10 +2770,54 @@ with col_right:
                             _rpdf.cell(22, 5, f"Iter {_h['attempt']}")
                             _rpdf.set_font("Helvetica","",9)
                             _rpdf.set_text_color(30,30,30)
+                            # Word count
+                            _wc = len(_h.get("draft","").split())
                             _rpdf.multi_cell(_cw-22, 5,
-                                _rsan(f"LTN {_ls:.4f} | {_np}/{_nt} rules | {_outcome}"),
+                                _rsan(f"LTN {_ls:.4f} | {_np}/{_nt} rules | {_wc:,} words | {_outcome}"),
                                 align="L")
 
+                            # ── Rule state changes (improved / degraded) ──────
+                            _hi_idx = _history.index(_h)
+                            if _hi_idx > 0:
+                                _prev_audit = {r.get("rule_id"): r
+                                               for r in _history[_hi_idx-1]["audit"]}
+                                _curr_audit = {r.get("rule_id"): r
+                                               for r in _h["audit"]}
+                                _improved_r, _degraded_r = [], []
+                                for _rid, _cr in _curr_audit.items():
+                                    _pr = _prev_audit.get(_rid)
+                                    if _pr:
+                                        _pd = _pr.get("compliance_score", 0)
+                                        _cd = _cr.get("compliance_score", 0)
+                                        _rd = _cr.get("rule_display","")[:50]
+                                        if _cd > _pd + 0.01:
+                                            _improved_r.append(
+                                                f"  + {_rd}: {_pd:.2f}->{_cd:.2f}")
+                                        elif _cd < _pd - 0.01:
+                                            _degraded_r.append(
+                                                f"  - {_rd}: {_pd:.2f}->{_cd:.2f}")
+                                if _improved_r:
+                                    _rpdf.set_x(_rpdf.l_margin + 6)
+                                    _rpdf.set_font("Helvetica","B",7)
+                                    _rpdf.set_text_color(55,180,130)
+                                    _rpdf.cell(_cw-6, 4, "Rules improved:", ln=True)
+                                    for _rline in _improved_r[:4]:
+                                        _rpdf.set_x(_rpdf.l_margin + 10)
+                                        _rpdf.set_font("Helvetica","",7)
+                                        _rpdf.set_text_color(55,160,110)
+                                        _rpdf.multi_cell(_cw-10, 4, _rsan(_rline), align="L")
+                                if _degraded_r:
+                                    _rpdf.set_x(_rpdf.l_margin + 6)
+                                    _rpdf.set_font("Helvetica","B",7)
+                                    _rpdf.set_text_color(220,100,95)
+                                    _rpdf.cell(_cw-6, 4, "Rules degraded:", ln=True)
+                                    for _rline in _degraded_r[:4]:
+                                        _rpdf.set_x(_rpdf.l_margin + 10)
+                                        _rpdf.set_font("Helvetica","",7)
+                                        _rpdf.set_text_color(200,80,80)
+                                        _rpdf.multi_cell(_cw-10, 4, _rsan(_rline), align="L")
+
+                            # ── Violations that triggered next rewrite ────────
                             if not _viols:
                                 _rpdf.set_x(_rpdf.l_margin + 6)
                                 _rpdf.set_font("Helvetica","I",8)
@@ -2718,13 +2832,11 @@ with col_right:
                                     _vmeth = "Symbolic" if _v.get("symbolic_check_used") else "Semantic"
                                     _vextr = _rsan(str(_v.get("extracted_value_raw",""))[:80])
 
-                                    # Rule name
                                     _rpdf.set_x(_rpdf.l_margin + 6)
                                     _rpdf.set_font("Helvetica","B",8)
                                     _rpdf.set_text_color(200,80,80)
                                     _rpdf.multi_cell(_cw-6, 4,
                                         _rsan(f"FAIL ({_vs:.2f}) -- {_vd}"), align="L")
-                                    # Why it failed
                                     _rpdf.set_x(_rpdf.l_margin + 10)
                                     _rpdf.set_font("Helvetica","",7)
                                     _rpdf.set_text_color(80,80,80)
@@ -2742,45 +2854,87 @@ with col_right:
                                         _rpdf.set_font("Helvetica","I",7)
                                         _rpdf.set_text_color(150,100,50)
                                         _rpdf.cell(_cw-10, 4,
-                                            "-> System rewrote draft based on this failure", ln=True)
+                                            "-> System rewrote draft based on this failure",
+                                            ln=True)
                                     _rpdf.ln(1)
-                            _rpdf.ln(2)
 
-                    # Sources with URLs
-                    if _sources:
+                            # ── Draft excerpt (first 300 chars) ───────────────
+                            _excerpt = _h.get("draft","")[:300].replace("\n"," ").strip()
+                            if _excerpt:
+                                if _rpdf.get_y() > _rpdf.h - 20: _rpdf.add_page()
+                                _rpdf.set_x(_rpdf.l_margin + 6)
+                                _rpdf.set_font("Helvetica","I",7)
+                                _rpdf.set_text_color(110,110,110)
+                                _rpdf.set_fill_color(248,248,248)
+                                _rpdf.multi_cell(_cw-6, 3.8,
+                                    _rsan(f'Draft excerpt: "{_excerpt}..."'),
+                                    align="L", fill=True)
+                            _rpdf.ln(3)
+
+                    # ── Reference URLs — all sources, full clickable URLs ──────
+                    # Collect every URL from sources (Wikipedia, DDG, Web,
+                    # Google, Custom URLs).  Print the FULL url using
+                    # rpdf.write() which supports the link= parameter AND
+                    # auto-wraps long URLs — no truncation ever.
+                    _all_refs = []
+                    for _src in _sources:
+                        _ref = (_src.get("reference","") or
+                                _src.get("source","") or "").strip()
+                        if _ref and _ref not in ("None","none",""):
+                            _all_refs.append({
+                                "source_name": _src.get("source_name","Source"),
+                                "title"      : _src.get("title",""),
+                                "url"        : _ref,
+                                "context"    : _src.get("context",""),
+                            })
+
+                    if _all_refs:
                         if _rpdf.get_y() > _rpdf.h - 50: _rpdf.add_page()
                         _rpdf.ln(2)
                         _rpdf.set_font("Helvetica","B",11)
                         _rpdf.set_text_color(46,117,182)
                         _rpdf.set_x(_rpdf.l_margin)
-                        _rpdf.cell(_cw, 6, "Research Sources Used", ln=True)
+                        _rpdf.cell(_cw, 6,
+                            f"Research Sources & Reference URLs ({len(_all_refs)})",
+                            ln=True)
                         _rpdf.set_draw_color(46,117,182); _rpdf.set_line_width(0.3)
                         _rpdf.line(_rpdf.l_margin, _rpdf.get_y(),
                                    _rpdf.w-_rpdf.r_margin, _rpdf.get_y())
                         _rpdf.ln(3)
-                        for _src in _sources:
-                            if _rpdf.get_y() > _rpdf.h - 40: _rpdf.add_page()
+
+                        for _si, _src in enumerate(_all_refs):
+                            if _rpdf.get_y() > _rpdf.h - 45: _rpdf.add_page()
+
+                            # Source name + title header
                             _rpdf.set_x(_rpdf.l_margin)
                             _rpdf.set_font("Helvetica","B",9)
                             _rpdf.set_text_color(30,30,30)
                             _rpdf.multi_cell(_cw, 5,
-                                _rsan(f"{_src.get('source_name','')} -- {_src.get('title','')}"),
+                                _rsan(f"[{_si+1}] {_src['source_name']} -- {_src['title']}"),
                                 align="L")
-                            # Context snippet
-                            _rpdf.set_x(_rpdf.l_margin)
-                            _rpdf.set_font("Helvetica","",8)
-                            _rpdf.set_text_color(90,90,90)
-                            _rpdf.multi_cell(_cw, 4,
-                                _rsan(_src.get("context","")[:200]+"..."), align="L")
-                            # URL — print in blue monospace
-                            _ref = _src.get("reference","") or _src.get("source","") or ""
-                            if _ref and _ref not in ("None",""):
+
+                            # Context snippet (200 chars)
+                            _ctx_snip = _src["context"][:200].strip()
+                            if _ctx_snip:
                                 _rpdf.set_x(_rpdf.l_margin)
-                                _rpdf.set_font("Courier","",7)
-                                _rpdf.set_text_color(46,117,182)
-                                # Truncate very long URLs for readability
-                                _url_disp = _ref[:90] + ("..." if len(_ref)>90 else "")
-                                _rpdf.multi_cell(_cw, 4, _url_disp, align="L")
+                                _rpdf.set_font("Helvetica","I",8)
+                                _rpdf.set_text_color(100,100,100)
+                                _rpdf.multi_cell(_cw, 4,
+                                    _rsan(f'"{_ctx_snip}..."'), align="L")
+
+                            # Full URL — clickable, blue, wraps naturally
+                            # fpdf2 write() supports link= and auto-wraps
+                            _url = _src["url"]
+                            if _url:
+                                _rpdf.set_x(_rpdf.l_margin)
+                                _rpdf.set_font("Courier","",7.5)
+                                _rpdf.set_text_color(27,100,200)
+                                try:
+                                    _rpdf.write(4.5, _url, link=_url)
+                                    _rpdf.ln(4.5)
+                                except Exception:
+                                    # Fallback: multi_cell without link if write fails
+                                    _rpdf.multi_cell(_cw, 4, _rsan(_url), align="L")
                             _rpdf.ln(3)
 
                     _rpt_pdf_bytes = bytes(_rpdf.output())
