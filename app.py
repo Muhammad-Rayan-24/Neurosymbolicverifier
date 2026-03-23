@@ -101,6 +101,79 @@ def _draft_to_pdf(draft_text: str, run_id: str = "", ltn_score: float = None,
     # including in positions where the line-level safe() call might be skipped.
     draft_text = sanitize(draft_text)
 
+    # ── LaTeX → plain-text converter ──────────────────────────────────────────
+    # fpdf2 / Helvetica has zero LaTeX support.  Convert the most common
+    # math constructs to readable ASCII so nothing prints as raw backslash junk.
+    def _latex_to_plain(s):
+        s = s.strip()
+        # Strip outer delimiters  \[ \]  \( \)
+        if s.startswith(r'\['):  s = s[2:]
+        if s.endswith(r'\]'):    s = s[:-2]
+        if s.startswith(r'\('):  s = s[2:]
+        if s.endswith(r'\)'):    s = s[:-2]
+        # \frac{a}{b}  →  (a)/(b)   (repeat for nested fractions)
+        import re as _re2
+        for _ in range(6):
+            s, n = _re2.subn(r'\\frac\{([^{}]*)\}\{([^{}]*)\}', r'(\1)/(\2)', s)
+            if not n:
+                break
+        # \sum_{low}^{high}
+        s = _re2.sub(r'\\sum_\{([^}]*)\}\^\{([^}]*)\}', r'sum(\1 to \2)', s)
+        s = _re2.sub(r'\\sum_([a-zA-Z0-9=])\^([a-zA-Z0-9])', r'sum(\1 to \2)', s)
+        s = _re2.sub(r'\\sum', 'sum', s)
+        # \sqrt{x}  →  sqrt(x)
+        s = _re2.sub(r'\\sqrt\{([^}]*)\}', r'sqrt(\1)', s)
+        # Spacing / operator commands
+        s = s.replace(r'\,', ' ').replace(r'\;', ' ').replace(r'\!', '')
+        s = s.replace(r'\cdot', '*').replace(r'\times', 'x').replace(r'\div', '/')
+        s = s.replace(r'\pm', '+/-').replace(r'\mp', '-/+')
+        s = s.replace(r'\leq', '<=').replace(r'\geq', '>=')
+        s = s.replace(r'\le',  '<=').replace(r'\ge',  '>=')
+        s = s.replace(r'\neq', '!=').replace(r'\approx', '~=')
+        s = s.replace(r'\infty', 'inf').replace(r'\ldots', '...').replace(r'\cdots', '...')
+        # Greek letters — common ones
+        _greek = {
+            r'\theta': 'theta', r'\alpha': 'alpha', r'\beta': 'beta',
+            r'\gamma': 'gamma', r'\delta': 'delta', r'\epsilon': 'eps',
+            r'\zeta': 'zeta',  r'\eta': 'eta',     r'\kappa': 'kappa',
+            r'\lambda': 'lambda',r'\mu': 'mu',      r'\nu': 'nu',
+            r'\xi': 'xi',      r'\pi': 'pi',        r'\rho': 'rho',
+            r'\sigma': 'sigma', r'\tau': 'tau',     r'\phi': 'phi',
+            r'\chi': 'chi',    r'\psi': 'psi',      r'\omega': 'omega',
+            r'\Theta': 'Theta', r'\Gamma': 'Gamma', r'\Delta': 'Delta',
+            r'\Sigma': 'Sigma', r'\Omega': 'Omega', r'\Lambda': 'Lambda',
+        }
+        for latex_g, plain_g in _greek.items():
+            s = s.replace(latex_g, plain_g)
+        # Superscripts  ^{...}  and subscripts  _{...}
+        s = _re2.sub(r'\^\{([^}]*)\}', r'^(\1)', s)
+        s = _re2.sub(r'_\{([^}]*)\}',  r'_(\1)', s)
+        s = _re2.sub(r'\^([a-zA-Z0-9])', r'^\1', s)
+        s = _re2.sub(r'_([a-zA-Z0-9])',  r'_\1', s)
+        # Formatting commands that should just be removed
+        s = _re2.sub(r'\\(?:text|mathrm|mathbf|mathit|mathtt|boldsymbol)\{([^}]*)\}', r'\1', s)
+        # Remove remaining unknown \commands
+        s = _re2.sub(r'\\[a-zA-Z]+\*?', '', s)
+        # Strip remaining bare braces
+        s = s.replace('{', '').replace('}', '')
+        # Collapse whitespace
+        s = _re2.sub(r' {2,}', ' ', s).strip()
+        return s
+
+    # Pre-process inline LaTeX  \(...\)  and  $...$  in the full draft text
+    # so that any math embedded inside bullets, body text, or headings
+    # comes out as readable plain text before line-by-line rendering.
+    def _clean_inline_math(text):
+        # \( ... \)  inline display
+        text = _r.sub(r'\\\((.+?)\\\)', lambda m: _latex_to_plain(m.group(1)), text,
+                      flags=_r.DOTALL)
+        # $...$  (single dollar, not $$)
+        text = _r.sub(r'(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)',
+                      lambda m: _latex_to_plain(m.group(1)), text)
+        return text
+
+    draft_text = _clean_inline_math(draft_text)
+
     # Pre-collect lines so we can look ahead for table blocks
     _lines = draft_text.split("\n")
     _li = 0
@@ -111,7 +184,72 @@ def _draft_to_pdf(draft_text: str, run_id: str = "", ltn_score: float = None,
         if not line.strip():
             pdf.ln(3); continue
 
-        # ── Markdown table detection: consume all | rows at once ───────────
+        # ── Fenced code block: ```lang ... ``` ─────────────────────────────
+        # Collect all lines between the opening and closing ``` fence.
+        # Render in Courier on a light green background with a fine border.
+        if line.strip().startswith("```"):
+            code_lines = []
+            while _li < len(_lines):
+                cl = _lines[_li]; _li += 1
+                if cl.strip().startswith("```"):
+                    break
+                code_lines.append(cl)
+            if code_lines:
+                pdf.ln(2)
+                # Draw a filled rect behind the whole block
+                _bx  = pdf.l_margin
+                _by  = pdf.get_y()
+                _bw  = cw
+                _bh  = len(code_lines) * 4.5 + 4
+                if _by + _bh > pdf.h - 18:
+                    pdf.add_page(); _by = pdf.get_y()
+                pdf.set_fill_color(242, 248, 242)
+                pdf.set_draw_color(170, 200, 170)
+                pdf.set_line_width(0.25)
+                pdf.rect(_bx, _by, _bw, _bh, style='FD')
+                pdf.set_y(_by + 2)
+                for cl in code_lines:
+                    pdf.set_font("Courier", "", 8.5); set_c(C_CODE)
+                    pdf.set_x(_bx + 3)
+                    pdf.multi_cell(_bw - 6, 4.5, sanitize(cl), align="L")
+                pdf.set_y(_by + _bh)
+                pdf.ln(2)
+            continue
+
+        # ── Display math block: \[ ... \] ──────────────────────────────────
+        # fpdf2 cannot render LaTeX.  Detect \[...\] blocks (which may span
+        # multiple lines), convert to readable plain-text via _latex_to_plain,
+        # and render centred in Courier on a pale-blue tinted background.
+        _stripped = line.strip()
+        if _stripped.startswith(r'\['):
+            math_lines = []
+            rest = _stripped[2:].strip()
+            if r'\]' in rest:
+                # Entire block on one line: \[ ... \]
+                math_lines.append(rest[:rest.index(r'\]')].strip())
+            else:
+                if rest:
+                    math_lines.append(rest)
+                while _li < len(_lines):
+                    ml = _lines[_li]; _li += 1
+                    if r'\]' in ml:
+                        before = ml[:ml.index(r'\]')].strip()
+                        if before:
+                            math_lines.append(before)
+                        break
+                    math_lines.append(ml.strip())
+            plain = _latex_to_plain(' '.join(math_lines))
+            if plain:
+                pdf.ln(2)
+                pdf.set_font("Courier", "I", 9); set_c((50, 80, 130))
+                pdf.set_fill_color(243, 246, 253)
+                pdf.set_draw_color(180, 195, 225)
+                pdf.set_line_width(0.2)
+                pdf.set_x(pdf.l_margin + 4)
+                pdf.multi_cell(cw - 8, 5.5, sanitize(plain),
+                               align="C", fill=True, border=1)
+                pdf.ln(2)
+            continue
         if line.startswith("|"):
             _tbl_lines = [line]
             while _li < len(_lines) and _lines[_li].strip().startswith("|"):
@@ -454,6 +592,8 @@ def _build_constraint_injection(structured_rules: list) -> str:
     lines.append("IMPORTANT: Use explicit numbers throughout.")
     lines.append("Never use vague terms like 'several', 'a few', 'moderate'.")
     lines.append("Every constraint variable MUST appear with its exact value.")
+    lines.append("All boolean label lines (variable_name: true/false) go at the END")
+    lines.append("of your response under the header 'CONSTRAINT VERIFICATION LABELS'.")
     return "\n".join(lines)
 
 
@@ -1227,10 +1367,13 @@ with col_right:
         if structured_rules:
             prog.progress(38, text="📋 Rules ready…")
             src_badge_html = {
-                "User"      : '<span class="src-badge src-user">USER</span>',
-                "Document"  : '<span class="src-badge src-doc">DOC</span>',
-                "Wikipedia" : '<span class="src-badge src-wiki">WIKI</span>',
-                "DuckDuckGo": '<span class="src-badge src-ddg">DDG</span>',
+                "User"        : '<span class="src-badge src-user">USER</span>',
+                "Document"    : '<span class="src-badge src-doc">DOC</span>',
+                "Wikipedia"   : '<span class="src-badge src-wiki">WIKI</span>',
+                "DuckDuckGo"  : '<span class="src-badge src-ddg">DDG</span>',
+                "Web Search"  : '<span class="src-badge" style="background:rgba(100,180,232,0.14);color:#64b4e8;">WEB</span>',
+                "Google Search": '<span class="src-badge" style="background:rgba(80,200,120,0.14);color:#50c878;">GOOG</span>',
+                "Custom URL"  : '<span class="src-badge" style="background:rgba(200,150,232,0.14);color:#c896e8;">URL</span>',
             }
             chips = '<div class="rules-container" style="margin-bottom:0.8rem;">'
             for i, r in enumerate(structured_rules):
@@ -1299,7 +1442,18 @@ with col_right:
                     + ("\n".join(ctx_parts) if ctx_parts else "None")
                     + "\n\nGenerate a detailed, helpful response that explicitly states "
                       "all relevant values as numbers and uses the exact variable labels "
-                      "specified in the constraints above."
+                      "specified in the constraints above.\n\n"
+                      "FORMATTING RULES — READ CAREFULLY:\n"
+                      "1. Do NOT start your response with a block of constraint flag lines "
+                      "(lines like `variable_name: true` or `variable_name: false`). "
+                      "ALL such verification label lines must go at the very END of your "
+                      "response, after all prose and explanatory content, under the exact "
+                      "section header: 'CONSTRAINT VERIFICATION LABELS'.\n"
+                      "2. Every numbered list item you start (1. 2. 3. ...) MUST be "
+                      "completed with full content. Never leave a trailing number with "
+                      "no text after it.\n"
+                      "3. Write in natural prose — constraint labels exist for machine "
+                      "verification only and must never interrupt or dominate your content."
                 )
 
                 try:
@@ -1311,7 +1465,11 @@ with col_right:
 
                     if llm_config.get("provider") == "anthropic":
                         import anthropic as _ant
-                        _anth_client = _ant.Anthropic(api_key=api_key)
+                        import hashlib as _hl
+                        _ant_ck = _hl.md5(("anthropic" + llm_config["model"] + api_key).encode()).hexdigest()
+                        if _ant_ck not in m2._CLIENT_CACHE:
+                            m2._CLIENT_CACHE[_ant_ck] = _ant.Anthropic(api_key=api_key)
+                        _anth_client = m2._CLIENT_CACHE[_ant_ck]
                         with _anth_client.messages.stream(
                             model=llm_config["model"], max_tokens=16000,
                             messages=[{"role":"user","content":gen_prompt}]
