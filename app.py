@@ -704,6 +704,21 @@ with col_left:
                                value=0.80, step=0.05, key="ltn_threshold_slider",
                                help="Score above this = all constraints satisfied")
 
+    # Web research toggle
+    _has_doc = bool(st.session_state.get("doc_upload") or
+                    st.session_state.get("existing_draft","").strip())
+    use_web_research = st.checkbox(
+        "🌐 Web research (Wikipedia + DuckDuckGo)",
+        value=not _has_doc,
+        key="use_web_research",
+        help="Disabled automatically when a document is uploaded. Enable to add rules from web sources."
+    )
+    if _has_doc and use_web_research:
+        st.caption(
+            "⚠️ Document loaded + web research on. Research uses your prompt as query, "
+            "not the document — may pull unrelated rules. Disable for pure document tasks."
+        )
+
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ── Generation Prompt ─────────────────────────────────────────────────────
@@ -927,13 +942,23 @@ with col_right:
         source_results   = []
         structured_rules = []
         memory_context   = []
-        do_research = has_m4 and mode in ["🔬 Full", "🌐 Research+Gen"]
+        _web_research_enabled = st.session_state.get("use_web_research", True)
+        _doc_present = bool(existing_draft.strip())
+        do_research = (
+            has_m4
+            and mode in ["🔬 Full", "🌐 Research+Gen"]
+            and _web_research_enabled
+        )
         do_rules    = bool(rules_snapshot)
 
         prog.progress(8, text="⚡ Research & rule parsing in parallel…")
 
         def _run_research():
-            return m4.research_all_sources(user_prompt, api_key=api_key, llm_config=llm_config)
+            # Always search using the user prompt, never the document text.
+            # If there is no prompt (doc-only task), skip research.
+            if not user_prompt.strip():
+                return []
+            return m4.research_all_sources(user_prompt.strip(), api_key=api_key, llm_config=llm_config)
 
         def _run_rule_parse():
             return m2.parse_rules_parallel(rules_snapshot, api_key, llm_config=llm_config)
@@ -954,6 +979,9 @@ with col_right:
                     results["sources"] = source_results
                 except Exception as e:
                     st.warning(f"M4 research failed (non-fatal): {e}")
+            elif not _web_research_enabled:
+                _skip_reason = "document mode" if _doc_present else "web research disabled"
+                status.info(f"📄 Skipping web research ({_skip_reason}) — rules from user + document only.")
 
             if "rules" in futures:
                 try:
