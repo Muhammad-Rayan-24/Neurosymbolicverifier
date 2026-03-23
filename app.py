@@ -948,12 +948,28 @@ with col_right:
                 if memory_context:
                     ctx_parts.append("Relevant constraints:\n" + "\n".join(memory_context))
 
+                # Build document block — injected into prompt when user uploaded/pasted a doc
+                _doc_text = existing_draft.strip()
+                if _doc_text:
+                    # Truncate to 40k chars to stay within context limits
+                    _doc_preview = _doc_text[:40000]
+                    _doc_block = (
+                        f"\n\nREFERENCE DOCUMENT (treat as source material):\n"
+                        f"The following is the full text of a document provided by the user.\n"
+                        f"You MUST use its content directly where the rules require it.\n"
+                        f"Do NOT paraphrase, fabricate, or substitute this content.\n"
+                        f"---\n{_doc_preview}\n---\n"
+                    )
+                else:
+                    _doc_block = ""
+
                 gen_prompt = (
                     f"You are generating content for a user request. "
                     f"You MUST satisfy every constraint below.\n\n"
                     f"USER REQUEST:\n{user_prompt}\n\n"
                     f"{constraint_block}\n"
-                    f"{violation_feedback}\n\n"
+                    f"{violation_feedback}"
+                    f"{_doc_block}\n\n"
                     f"ADDITIONAL CONTEXT FROM RESEARCH:\n"
                     + ("\n".join(ctx_parts) if ctx_parts else "None")
                     + "\n\nGenerate a detailed, helpful response that explicitly states "
@@ -963,7 +979,8 @@ with col_right:
 
                 try:
                     _model_display = llm_config.get("model", "model")
-                    status.info(f"⚡ {iter_label} — generating with {_model_display}…")
+                    _doc_note = f" (+ {len(_doc_text):,} char document)" if _doc_text else ""
+                    status.info(f"⚡ {iter_label} — generating with {_model_display}{_doc_note}…")
                     stream_box = st.empty()
                     collected  = []
 
