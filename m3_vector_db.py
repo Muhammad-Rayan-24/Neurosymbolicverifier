@@ -103,22 +103,60 @@ def setup_memory(url: str = None, qdrant_api_key: str = None, **kwargs):
     If url/qdrant_api_key are not provided, falls back to the module-level
     QDRANT_URL / QDRANT_API_KEY constants defined at the top of this file.
     kwargs absorbed for API compatibility (old code passed openai_api_key).
+
+    Dimension-mismatch guard: if a collection already exists but was created
+    with a different vector size (e.g. 1536 from a previous OpenAI-embeddings
+    version vs the current 384 from sentence-transformers), the collection is
+    automatically deleted and recreated with the correct dimension.  This
+    prevents the "Wrong input: Vector dimension error" 400 from Qdrant cloud.
     """
     if not QDRANT_AVAILABLE:
         raise ImportError("qdrant-client not installed. Run: pip install qdrant-client")
-    # Use module constants as defaults so cloud Qdrant is always used when
-    # the UI fields are left blank
     _url = url or QDRANT_URL or ""
     _key = qdrant_api_key or QDRANT_API_KEY or ""
-    client   = _get_client(url=_url or None, api_key=_key or None)
+    client  = _get_client(url=_url or None, api_key=_key or None)
     existing = {c.name for c in client.get_collections().collections}
+
     for name in _COLLECTIONS:
-        if name not in existing:
+        needs_create = name not in existing
+
+        # ── Dimension mismatch check ──────────────────────────────────────────
+        # If the collection exists, verify its vector size matches _EMBED_DIM.
+        # Mismatch happens when the cluster was previously used with a different
+        # embedding model (e.g. OpenAI 1536-dim vs sentence-transformers 384-dim).
+        if not needs_create:
+            try:
+                coll_info    = client.get_collection(name)
+                # Support both qdrant-client v1.x and v1.10+ API shapes
+                vecs_cfg     = coll_info.config.params.vectors
+                existing_dim = (
+                    vecs_cfg.size              # single-vector collection
+                    if hasattr(vecs_cfg, "size")
+                    else list(vecs_cfg.values())[0].size  # named-vector collection
+                )
+                if existing_dim != _EMBED_DIM:
+                    print(
+                        f"[M3] Collection '{name}' has dim={existing_dim}, "
+                        f"expected {_EMBED_DIM} — deleting and recreating."
+                    )
+                    client.delete_collection(name)
+                    needs_create = True
+            except Exception as _dim_err:
+                # If we can't inspect the collection, recreate it to be safe
+                print(f"[M3] Could not verify dim for '{name}': {_dim_err} — recreating.")
+                try:
+                    client.delete_collection(name)
+                except Exception:
+                    pass
+                needs_create = True
+
+        if needs_create:
             client.create_collection(
                 collection_name=name,
                 vectors_config=VectorParams(size=_EMBED_DIM, distance=Distance.COSINE),
             )
-            print(f"[M3] Created collection '{name}'")
+            print(f"[M3] Created collection '{name}' (dim={_EMBED_DIM})")
+
     return client
 
 
