@@ -282,56 +282,154 @@ def store_audit_result(client, audit_result: dict, run_id: str = "", **kwargs) -
 
 # ── Retrieve functions ────────────────────────────────────────────────────────
 
+def _make_run_filter(run_id: str):
+    """
+    Build a Qdrant Filter for run_id.  Returns None if construction fails
+    (e.g. older qdrant-client that doesn't support these models).
+    """
+    if not run_id:
+        return None
+    try:
+        return Filter(
+            must=[FieldCondition(key="run_id", match=MatchValue(value=run_id))]
+        )
+    except Exception:
+        return None
+
+
+def _scroll_robust(client, collection: str, run_filter, limit: int) -> list:
+    """
+    Call client.scroll() trying every known parameter-name variant across
+    qdrant-client versions, then fall back to unfiltered + Python filter.
+    Returns list of payload dicts.
+    """
+    def _payloads(result):
+        return [pt.payload for pt in result[0]]
+
+    # Attempt 1 — modern API (qdrant-client >= 1.9): scroll_filter=
+    try:
+        return _payloads(client.scroll(
+            collection_name=collection,
+            scroll_filter=run_filter,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        ))
+    except TypeError:
+        pass
+    except Exception as e:
+        print(f"   [M3] scroll (scroll_filter) error: {e}")
+
+    # Attempt 2 — older API variant: query_filter=
+    try:
+        return _payloads(client.scroll(
+            collection_name=collection,
+            query_filter=run_filter,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        ))
+    except TypeError:
+        pass
+    except Exception as e:
+        print(f"   [M3] scroll (query_filter) error: {e}")
+
+    # Attempt 3 — positional filter (very old API)
+    try:
+        return _payloads(client.scroll(
+            collection,
+            run_filter,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        ))
+    except TypeError:
+        pass
+    except Exception as e:
+        print(f"   [M3] scroll (positional) error: {e}")
+
+    # Attempt 4 — no filter at all, then filter in Python by run_id
+    try:
+        all_pts = _payloads(client.scroll(
+            collection_name=collection,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        ))
+        # If we have a run_id, filter in Python
+        if run_filter is not None:
+            # Extract the run_id value we're looking for from the filter
+            try:
+                wanted = run_filter.must[0].match.value
+                return [p for p in all_pts if p.get("run_id") == wanted]
+            except Exception:
+                pass
+        return all_pts
+    except Exception as e:
+        print(f"   [M3] scroll (no filter) error: {e}")
+        return []
+
+
 def retrieve_context(client, query_text: str, n_results: int = 4,
                      run_id: str = "", **kwargs) -> list:
     """
     Semantic search across rules and sources for the CURRENT run only.
 
-    run_id is mandatory for isolation — when provided, only records tagged
-    with that run_id are searched.  This prevents context from a previous
-    run leaking into the current generation prompt (the cross-query
-    contamination bug).  When run_id is empty the filter is skipped and
-    all records are searched (legacy / test behaviour).
+    run_id is mandatory for isolation — only records tagged with that
+    run_id are searched.  This prevents context from a previous run
+    leaking into the current generation prompt.
     """
     try:
-        vec = _embed(query_text)
-        texts = []
-
-        # Build a run_id filter so we only pull context from THIS run
-        _run_filter = None
-        if run_id:
-            try:
-                _run_filter = Filter(
-                    must=[FieldCondition(
-                        key="run_id",
-                        match=MatchValue(value=run_id),
-                    )]
-                )
-            except Exception:
-                _run_filter = None  # qdrant-client version doesn't support it — skip
+        vec        = _embed(query_text)
+        run_filter = _make_run_filter(run_id)
+        texts      = []
 
         for col in ("rules", "sources"):
             count = client.get_collection(col).points_count
             if count == 0:
                 continue
+
+            hits = []
+            # Try query_points() (qdrant-client >= 1.10)
             try:
-                # qdrant-client >= 1.10 uses query_points()
-                qr = client.query_points(
+                qr   = client.query_points(
                     collection_name=col,
                     query=vec,
-                    query_filter=_run_filter,
+                    query_filter=run_filter,
                     limit=min(n_results, count),
                     with_payload=True,
                 )
                 hits = qr.points
             except AttributeError:
-                # fallback for older qdrant-client
-                hits = client.search(
-                    collection_name=col,
-                    query_vector=vec,
-                    query_filter=_run_filter,
-                    limit=min(n_results, count),
-                )
+                pass
+            except Exception:
+                pass
+
+            # Fall back to search()
+            if not hits:
+                try:
+                    hits = client.search(
+                        collection_name=col,
+                        query_vector=vec,
+                        query_filter=run_filter,
+                        limit=min(n_results, count),
+                    )
+                except Exception:
+                    pass
+
+            # Last resort: search without filter, filter in Python
+            if not hits and run_filter is not None:
+                try:
+                    raw = client.search(
+                        collection_name=col,
+                        query_vector=vec,
+                        limit=min(n_results * 4, count),
+                    )
+                    hits = [h for h in raw
+                            if h.payload.get("run_id") == run_id][:n_results]
+                except Exception:
+                    pass
+
             texts.extend(h.payload.get("text", "") for h in hits)
         return texts[:n_results]
     except Exception as e:
@@ -343,31 +441,14 @@ def get_all_records(client, collection: str, limit: int = 200,
                     run_id: str = "") -> list:
     """
     Fetch stored points for Second Brain visualisation.
-    When run_id is provided, returns only records from that run so the
-    Second Brain tab shows the current session's data, not every run ever.
+    When run_id is provided, returns only records from that run.
+    Uses _scroll_robust() to handle all qdrant-client version variants.
     """
     try:
-        _scroll_filter = None
-        if run_id:
-            try:
-                _scroll_filter = Filter(
-                    must=[FieldCondition(
-                        key="run_id",
-                        match=MatchValue(value=run_id),
-                    )]
-                )
-            except Exception:
-                _scroll_filter = None
-        result = client.scroll(
-            collection_name=collection,
-            scroll_filter=_scroll_filter,
-            limit=limit,
-            with_payload=True,
-            with_vectors=False,
-        )
-        return [pt.payload for pt in result[0]]
+        run_filter = _make_run_filter(run_id)
+        return _scroll_robust(client, collection, run_filter, limit)
     except Exception as e:
-        print(f"   [M3] scroll error ({collection}): {e}")
+        print(f"   [M3] get_all_records error ({collection}): {e}")
         return []
 
 
