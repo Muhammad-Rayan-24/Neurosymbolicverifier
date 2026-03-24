@@ -21,32 +21,30 @@ def _draft_to_pdf(draft_text: str, run_id: str = "", ltn_score: float = None,
 
     class PDF(FPDF):
         def header(self):
-            self.set_font("Helvetica", "B", 9)
-            self.set_text_color(120, 120, 120)
             _hcw = self.w - self.l_margin - self.r_margin
+            # ── Line 1: title (left, bold, 9pt) ──────────────────────────────
+            self.set_font("Helvetica", "B", 9)
+            self.set_text_color(100, 100, 100)
+            self.set_x(self.l_margin)
+            self.cell(_hcw, 5,
+                      "NeuroSymbolic Verifier  --  Verified Draft Output",
+                      align="L", ln=True)
+            # ── Line 2: badge metadata (right, regular, 7.5pt) ───────────────
+            # Putting the badge on its own line at smaller font guarantees it
+            # always fits regardless of how long the model/provider name is.
             if ltn_score is not None:
                 badge = (f"LTN {ltn_score:.4f}  |  {rules_passed}/{rules_total} rules"
-                         f"  |  {iterations_used} iter(s)  |  {llm_label}  |  run {run_id}")
-                # Measure badge width so the left title gets the remaining space.
-                # Both cells share the same row — ln=False on the first keeps the
-                # cursor on the same line for the right-aligned badge cell.
-                _badge_w = min(self.get_string_width(badge) + 4, _hcw * 0.72)
-                _title_w = _hcw - _badge_w
+                         f"  |  {iterations_used} iter(s)"
+                         f"  |  {llm_label}  |  run {run_id}")
+                self.set_font("Helvetica", "", 7)
+                self.set_text_color(150, 150, 150)
                 self.set_x(self.l_margin)
-                self.cell(_title_w, 8,
-                          "NeuroSymbolic Verifier -- Verified Draft Output",
-                          align="L", ln=False)
-                self.cell(_badge_w, 8, badge, align="R", ln=True)
-            else:
-                self.set_x(self.l_margin)
-                self.cell(_hcw, 8,
-                          "NeuroSymbolic Verifier -- Verified Draft Output",
-                          align="L", ln=True)
-            self.ln(2)
+                self.cell(_hcw, 4, badge, align="R", ln=True)
+            self.ln(1)
             self.set_draw_color(200, 169, 110)
             self.set_line_width(0.4)
             self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
-            self.ln(4)
+            self.ln(3)
 
         def footer(self):
             self.set_y(-14)
@@ -1421,7 +1419,11 @@ with col_right:
                     qdrant_client, query, n_results=4, run_id=run_id)
                 results["memory_context"] = memory_context
             except Exception as e:
-                st.warning(f"Qdrant step failed (non-fatal): {e}")
+                st.warning(
+                    f"⚠️ Qdrant step failed (non-fatal): {e}\n\n"
+                    f"Second Brain will be empty for this run. "
+                    f"The pipeline will continue normally."
+                )
             status.empty()
 
         # Show the user what rules are going to be enforced (with source badges)
