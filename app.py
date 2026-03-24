@@ -818,12 +818,9 @@ with col_left:
         "thinking"  : _model_choice in _THINKING_MODELS,
     }
 
-    # ── Qdrant Config ─────────────────────────────────────────────────────────
-    with st.expander("🧠 Qdrant Config (optional — defaults to in-memory)", expanded=False):
-        st.markdown('<p style="font-size:0.73rem;color:rgba(232,228,220,0.45);margin-bottom:0.5rem;">Leave blank for fast in-memory Qdrant.</p>', unsafe_allow_html=True)
-        qdrant_url_input = st.text_input("Qdrant URL", placeholder="https://…qdrant.io:6333 or blank", key="qdrant_url_field")
-        qdrant_key_input = st.text_input("Qdrant API Key", type="password", placeholder="your-qdrant-api-key or blank", key="qdrant_key_field")
-    # Fall back to the baked-in module constants if the UI fields + env are both empty
+    # ── Qdrant credentials — loaded silently from m3_vector_db module constants
+    # The UI expander has been removed since credentials are baked into m3_vector_db.py.
+    # To change the Qdrant instance, edit QDRANT_URL / QDRANT_API_KEY in that file.
     try:
         import m3_vector_db as _m3_cfg
         _m3_qdrant_url = _m3_cfg.QDRANT_URL
@@ -831,20 +828,8 @@ with col_left:
     except Exception:
         _m3_qdrant_url = ""
         _m3_qdrant_key = ""
-    qdrant_url = (qdrant_url_input.strip()
-                  or st.session_state.resolved_qdrant_url
-                  or _m3_qdrant_url
-                  or None)
-    qdrant_key = (qdrant_key_input.strip()
-                  or st.session_state.resolved_qdrant_key
-                  or _m3_qdrant_key
-                  or None)
-    if qdrant_url and not qdrant_url_input.strip():
-        st.markdown(
-            '<p style="font-size:0.7rem;color:rgba(109,206,168,0.7);margin-top:-0.25rem;">'
-            '🔒 Qdrant cloud credentials loaded from module config</p>',
-            unsafe_allow_html=True,
-        )
+    qdrant_url = (st.session_state.resolved_qdrant_url or _m3_qdrant_url or None)
+    qdrant_key = (st.session_state.resolved_qdrant_key or _m3_qdrant_key or None)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
