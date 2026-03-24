@@ -160,7 +160,41 @@ def setup_memory(url: str = None, qdrant_api_key: str = None, **kwargs):
     return client
 
 
-# ── Store functions ───────────────────────────────────────────────────────────
+def _safe_upsert(client, collection_name: str, points: list) -> None:
+    """
+    Upsert points, automatically recovering from vector-dimension mismatches.
+
+    If the Qdrant cloud cluster has the collection from a previous version with
+    a different embedding dimension (e.g. 1536 from OpenAI vs our current 384
+    from sentence-transformers), every upsert returns a 400 with:
+        'Wrong input: Vector dimension error: expected dim: 1536, got 384'
+
+    This helper catches that specific error, deletes the stale collection,
+    recreates it with the correct dimension, and retries the upsert — all
+    transparently.  This is more reliable than a pre-flight dimension check
+    because it fires at the exact moment of failure regardless of qdrant-client
+    version differences in the collection-info API shape.
+    """
+    try:
+        client.upsert(collection_name=collection_name, points=points)
+    except Exception as _upsert_err:
+        _msg = str(_upsert_err).lower()
+        if "vector dimension error" in _msg or "wrong input" in _msg or "400" in _msg:
+            print(f"   [M3] Dimension mismatch on '{collection_name}' — "
+                  f"deleting and recreating with dim={_EMBED_DIM}.")
+            try:
+                client.delete_collection(collection_name)
+            except Exception as _del_err:
+                print(f"   [M3] Delete failed: {_del_err}")
+            client.create_collection(
+                collection_name=collection_name,
+                vectors_config=VectorParams(
+                    size=_EMBED_DIM, distance=Distance.COSINE),
+            )
+            print(f"   [M3] Recreated '{collection_name}' — retrying upsert.")
+            client.upsert(collection_name=collection_name, points=points)
+        else:
+            raise
 
 def store_all_rules(client, structured_rules: list, run_id: str = "", **kwargs) -> list:
     """Batch-embed and store all rules. Returns list of point IDs."""
@@ -193,7 +227,7 @@ def store_all_rules(client, structured_rules: list, run_id: str = "", **kwargs) 
                 "record_type"     : "rule",
             }
         ))
-    client.upsert(collection_name="rules", points=points)
+    _safe_upsert(client, "rules", points)
     print(f"   [M3] Stored {len(points)} rule(s) in Qdrant (run={run_id}).")
     return ids
 
@@ -202,7 +236,7 @@ def store_source(client, source: dict, run_id: str = "", **kwargs) -> str:
     text = source.get("context", "")[:512]
     pid  = str(uuid.uuid4())
     vec  = _embed(text)
-    client.upsert(collection_name="sources", points=[PointStruct(
+    _safe_upsert(client, "sources", [PointStruct(
         id=pid, vector=vec,
         payload={
             "text"        : text,
@@ -223,7 +257,7 @@ def store_audit_result(client, audit_result: dict, run_id: str = "", **kwargs) -
             f"{audit_result.get('explanation','')}")
     pid = str(uuid.uuid4())
     vec = _embed(text)
-    client.upsert(collection_name="audit", points=[PointStruct(
+    _safe_upsert(client, "audit", [PointStruct(
         id=pid, vector=vec,
         payload={
             "text"                 : text,
