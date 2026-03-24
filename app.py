@@ -1507,15 +1507,64 @@ with col_right:
                 # Build document block — injected into prompt when user uploaded/pasted a doc
                 _doc_text = existing_draft.strip()
                 if _doc_text:
-                    # Truncate to 40k chars to stay within context limits
-                    _doc_preview = _doc_text[:40000]
-                    _doc_block = (
-                        f"\n\nREFERENCE DOCUMENT (treat as source material):\n"
-                        f"The following is the full text of a document provided by the user.\n"
-                        f"You MUST use its content directly where the rules require it.\n"
-                        f"Do NOT paraphrase, fabricate, or substitute this content.\n"
-                        f"---\n{_doc_preview}\n---\n"
+                    _doc_char_limit = 40000
+                    _truncated      = len(_doc_text) > _doc_char_limit
+                    _doc_preview    = _doc_text[:_doc_char_limit]
+
+                    # Warn user if document was truncated
+                    if _truncated:
+                        st.warning(
+                            f"⚠️ **Document truncated:** Your document is "
+                            f"{len(_doc_text):,} characters but the LLM context "
+                            f"limit is {_doc_char_limit:,} chars. Only the first "
+                            f"{_doc_char_limit:,} characters were sent. "
+                            f"Consider splitting the document or reducing other content."
+                        )
+
+                    # Warn if document looks like a failed PDF extraction (blank/near-blank)
+                    _non_blank_chars = len(_doc_text.replace(" ","").replace("\n",""))
+                    if _non_blank_chars < 100:
+                        st.warning(
+                            "⚠️ **Document appears empty or unreadable.** "
+                            "If you uploaded a scanned PDF, the pages are images — "
+                            "text extraction returns nothing. Try copy-pasting the "
+                            "text directly into the Reference Document field instead."
+                        )
+
+                    # Detect whether this is a Q&A scenario (prompt asks something
+                    # about the document) vs a generation scenario (document is
+                    # background material for a new piece of content).
+                    _qa_keywords = (
+                        "summarize", "summary", "explain", "what does", "what is",
+                        "analyze", "analyse", "review", "describe", "tell me",
+                        "answer", "extract", "find", "list", "identify",
+                        "according to", "based on", "from the document", "from this",
+                        "in the document", "the document says", "does it",
                     )
+                    _prompt_lower = user_prompt.lower()
+                    _is_qa_mode   = any(kw in _prompt_lower for kw in _qa_keywords)
+
+                    if _is_qa_mode:
+                        _doc_block = (
+                            f"\n\nDOCUMENT TO ANALYSE (the user's question is about this):\n"
+                            f"The following is the full text of a document provided by the user.\n"
+                            f"Your response MUST be grounded in this document's content.\n"
+                            f"Quote or cite specific parts when relevant.\n"
+                            f"If the document does not contain information needed to answer "
+                            f"the question, say so explicitly rather than guessing.\n"
+                            f"{'[NOTE: Document was truncated to first 40,000 chars]' if _truncated else ''}\n"
+                            f"---\n{_doc_preview}\n---\n"
+                        )
+                    else:
+                        _doc_block = (
+                            f"\n\nREFERENCE DOCUMENT (treat as source material):\n"
+                            f"The following is the full text of a document provided by the user.\n"
+                            f"You MUST use its content directly where the rules require it.\n"
+                            f"Do NOT paraphrase, fabricate, or substitute this content.\n"
+                            f"Cite or reference specific sections where relevant.\n"
+                            f"{'[NOTE: Document was truncated to first 40,000 chars]' if _truncated else ''}\n"
+                            f"---\n{_doc_preview}\n---\n"
+                        )
                 else:
                     _doc_block = ""
 
