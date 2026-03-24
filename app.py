@@ -23,10 +23,25 @@ def _draft_to_pdf(draft_text: str, run_id: str = "", ltn_score: float = None,
         def header(self):
             self.set_font("Helvetica", "B", 9)
             self.set_text_color(120, 120, 120)
-            self.cell(0, 8, "NeuroSymbolic Verifier -- Verified Draft Output", align="L")
+            _hcw = self.w - self.l_margin - self.r_margin
             if ltn_score is not None:
-                badge = f"LTN {ltn_score:.4f}  |  {rules_passed}/{rules_total} rules  |  {iterations_used} iter(s)  |  {llm_label}  |  run {run_id}"
-                self.cell(0, 8, badge, align="R")
+                badge = (f"LTN {ltn_score:.4f}  |  {rules_passed}/{rules_total} rules"
+                         f"  |  {iterations_used} iter(s)  |  {llm_label}  |  run {run_id}")
+                # Measure badge width so the left title gets the remaining space.
+                # Both cells share the same row — ln=False on the first keeps the
+                # cursor on the same line for the right-aligned badge cell.
+                _badge_w = min(self.get_string_width(badge) + 4, _hcw * 0.72)
+                _title_w = _hcw - _badge_w
+                self.set_x(self.l_margin)
+                self.cell(_title_w, 8,
+                          "NeuroSymbolic Verifier -- Verified Draft Output",
+                          align="L", ln=False)
+                self.cell(_badge_w, 8, badge, align="R", ln=True)
+            else:
+                self.set_x(self.l_margin)
+                self.cell(_hcw, 8,
+                          "NeuroSymbolic Verifier -- Verified Draft Output",
+                          align="L", ln=True)
             self.ln(2)
             self.set_draw_color(200, 169, 110)
             self.set_line_width(0.4)
@@ -2461,10 +2476,15 @@ with col_right:
 
                     class _RptPDF(FPDF):
                         def header(self):
-                            self.set_font("Helvetica", "B", 9)
+                            self.set_font("Helvetica", "B", 8)
                             self.set_text_color(120, 120, 120)
-                            self.cell(0, 8, f"NeuroSymbolic Verifier -- Transparency Report  |  {res.get('llm_provider_name','Claude')} / {res.get('llm_model','')}  |  run {_run_id}", align="L")
-                            self.ln(2)
+                            _hcw = self.w - self.l_margin - self.r_margin
+                            _htxt = (f"NeuroSymbolic Verifier -- Transparency Report  |  "
+                                     f"{res.get('llm_provider_name','Claude')} / "
+                                     f"{res.get('llm_model','')}  |  run {_run_id}")
+                            self.set_x(self.l_margin)
+                            self.multi_cell(_hcw, 5, _htxt, align="L")
+                            self.ln(1)
                             self.set_draw_color(200, 169, 110)
                             self.set_line_width(0.4)
                             self.line(self.l_margin, self.get_y(),
