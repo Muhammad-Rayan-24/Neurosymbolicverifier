@@ -1437,12 +1437,37 @@ with col_right:
                 "Web Search"  : '<span class="src-badge" style="background:rgba(100,180,232,0.14);color:#64b4e8;">WEB</span>',
                 "Google Search": '<span class="src-badge" style="background:rgba(80,200,120,0.14);color:#50c878;">GOOG</span>',
                 "Custom URL"  : '<span class="src-badge" style="background:rgba(200,150,232,0.14);color:#c896e8;">URL</span>',
+                # Research-derived rules use these source names
+                "Research"    : '<span class="src-badge" style="background:rgba(138,110,200,0.14);color:#a88ecc;">RES</span>',
+                ""            : '<span class="src-badge src-user">USER</span>',
             }
+            def _src_badge(sn):
+                """Return the right badge for any source name, with smart fallback."""
+                if sn in src_badge_html:
+                    return src_badge_html[sn]
+                # Partial-match fallbacks so new source names don't show raw truncation
+                _sl = sn.lower()
+                if "wiki" in _sl:
+                    return src_badge_html["Wikipedia"]
+                if "duck" in _sl or "ddg" in _sl:
+                    return src_badge_html["DuckDuckGo"]
+                if "google" in _sl:
+                    return src_badge_html["Google Search"]
+                if "web" in _sl or "search" in _sl:
+                    return src_badge_html["Web Search"]
+                if "url" in _sl or "http" in _sl:
+                    return src_badge_html["Custom URL"]
+                if "doc" in _sl or "upload" in _sl:
+                    return src_badge_html["Document"]
+                # Generic fallback with full abbreviated label, not just 4 chars
+                _abbr = sn.upper()[:5] if sn else "SRC"
+                return (f'<span class="src-badge" style="background:rgba(180,180,180,0.12);'
+                        f'color:rgba(232,228,220,0.55);">{_abbr}</span>')
             chips = '<div class="rules-container" style="margin-bottom:0.8rem;">'
             for i, r in enumerate(structured_rules):
-                sn   = r.get("source_name", "User")
-                bg   = src_badge_html.get(sn, f'<span class="src-badge src-user">{sn.upper()[:4]}</span>')
-                disp = r.get("display", r.get("original",""))[:70]
+                sn     = r.get("source_name", "User")
+                bg     = _src_badge(sn)
+                disp   = r.get("display", r.get("original",""))[:70]
                 disp_e = disp.replace("&","&amp;").replace("<","&lt;")
                 chips += f'<div class="rule-chip"><span class="rule-num">R{i+1}</span><span style="flex:1">{disp_e}</span>{bg}</div>'
             chips += '</div>'
@@ -1916,11 +1941,20 @@ with col_right:
             st.markdown("**Rules enforced in this run:**")
             src_colors = {
                 "User":"src-user","Document":"src-doc",
-                "Wikipedia":"src-wiki","DuckDuckGo":"src-ddg"
+                "Wikipedia":"src-wiki","DuckDuckGo":"src-ddg",
+                "Web Search":"src-ddg","Google Search":"src-wiki",
+                "Custom URL":"src-doc","Research":"src-wiki","":"src-user",
             }
+            def _insight_sc(sn):
+                if sn in src_colors: return src_colors[sn]
+                sl = sn.lower()
+                if "wiki" in sl: return "src-wiki"
+                if "duck" in sl or "ddg" in sl: return "src-ddg"
+                if "doc" in sl or "url" in sl: return "src-doc"
+                return "src-user"
             for i, r in enumerate(sr_list):
                 sn    = r.get("source_name","User")
-                sc    = src_colors.get(sn,"src-user")
+                sc    = _insight_sc(sn)
                 disp  = r.get("display", r.get("original",""))[:80]
                 op    = r.get("operator","")
                 th    = r.get("threshold")
