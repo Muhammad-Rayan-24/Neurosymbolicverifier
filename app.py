@@ -1284,6 +1284,15 @@ with col_right:
         )
         do_rules    = bool(rules_snapshot)
 
+        # Warn if user has research sources checked but mode blocks research
+        if _any_research and not do_research and mode == "📐 Audit Only":
+            st.warning(
+                "⚠️ **Research sources are checked but mode is 'Audit Only'** — "
+                "web research is skipped in Audit Only mode. "
+                "Switch to **🔬 Full** or **🌐 Research+Gen** to use web research.",
+                icon="🔍"
+            )
+
         prog.progress(8, text="⚡ Research & rule parsing in parallel…")
 
         def _run_research():
@@ -1321,9 +1330,18 @@ with col_right:
                     # Filter out failed/empty fetch results — only keep genuine sources
                     source_results = [s for s in _raw_sources
                                       if m4._is_valid_source(s)]
-                    if len(_raw_sources) != len(source_results):
-                        _skipped = len(_raw_sources) - len(source_results)
-                        print(f"   [App] Filtered {_skipped} failed source(s) from results.")
+                    _skipped = len(_raw_sources) - len(source_results)
+                    if source_results:
+                        print(f"   [App] {len(source_results)} valid source(s) from {len(_raw_sources)} fetched ({_skipped} failed/empty filtered).")
+                    elif _raw_sources:
+                        # Research ran but ALL results were failures — tell the user
+                        st.warning(
+                            f"⚠️ **Web research ran but returned no usable content.** "
+                            f"{len(_raw_sources)} fetch attempt(s) all failed or returned empty pages. "
+                            f"The pipeline will continue using only your rules. "
+                            f"Try enabling different research sources or check your internet connection.",
+                            icon="🌐"
+                        )
                     results["sources"] = source_results
                 except Exception as e:
                     st.warning(f"M4 research failed (non-fatal): {e}")
