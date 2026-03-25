@@ -729,6 +729,53 @@ def _diff_sentences(text_a: str, text_b: str) -> str:
     return {"added": adds[:6], "removed": removes[:6]}
 
 
+# ── Source badge helpers — module-level so they're available in ALL tabs ──────
+# Defined here (not inside the pipeline block) so they remain in scope when
+# Streamlit re-renders the results tabs on subsequent page loads.
+_SRC_BADGE_HTML = {
+    "User"         : '<span class="src-badge src-user">USER</span>',
+    "Document"     : '<span class="src-badge src-doc">DOC</span>',
+    "Wikipedia"    : '<span class="src-badge src-wiki">WIKI</span>',
+    "DuckDuckGo"   : '<span class="src-badge src-ddg">DDG</span>',
+    "Web Search"   : '<span class="src-badge" style="background:rgba(100,180,232,0.14);color:#64b4e8;">WEB</span>',
+    "Google Search": '<span class="src-badge" style="background:rgba(80,200,120,0.14);color:#50c878;">GOOG</span>',
+    "Custom URL"   : '<span class="src-badge" style="background:rgba(200,150,232,0.14);color:#c896e8;">URL</span>',
+    "Research"     : '<span class="src-badge" style="background:rgba(138,110,200,0.14);color:#a88ecc;">RES</span>',
+    ""             : '<span class="src-badge src-user">USER</span>',
+}
+
+def _src_badge(sn: str) -> str:
+    """Return the right HTML badge span for any source name, with smart fallback."""
+    if sn in _SRC_BADGE_HTML:
+        return _SRC_BADGE_HTML[sn]
+    sl = sn.lower()
+    if "wiki"   in sl: return _SRC_BADGE_HTML["Wikipedia"]
+    if "duck"   in sl or "ddg"    in sl: return _SRC_BADGE_HTML["DuckDuckGo"]
+    if "google" in sl:                   return _SRC_BADGE_HTML["Google Search"]
+    if "web"    in sl or "search" in sl: return _SRC_BADGE_HTML["Web Search"]
+    if "url"    in sl or "http"   in sl: return _SRC_BADGE_HTML["Custom URL"]
+    if "doc"    in sl or "upload" in sl: return _SRC_BADGE_HTML["Document"]
+    abbr = sn.upper()[:5] if sn else "SRC"
+    return (f'<span class="src-badge" style="background:rgba(180,180,180,0.12);'
+            f'color:rgba(232,228,220,0.55);">{abbr}</span>')
+
+_SRC_COLORS = {
+    "User":"src-user","Document":"src-doc",
+    "Wikipedia":"src-wiki","DuckDuckGo":"src-ddg",
+    "Web Search":"src-ddg","Google Search":"src-wiki",
+    "Custom URL":"src-doc","Research":"src-wiki","":"src-user",
+}
+
+def _insight_sc(sn: str) -> str:
+    """Return a CSS class for the insight tab badge."""
+    if sn in _SRC_COLORS: return _SRC_COLORS[sn]
+    sl = sn.lower()
+    if "wiki"   in sl: return "src-wiki"
+    if "duck"   in sl or "ddg"    in sl: return "src-ddg"
+    if "doc"    in sl or "url"    in sl: return "src-doc"
+    return "src-user"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # LAYOUT
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1429,40 +1476,6 @@ with col_right:
         # Show the user what rules are going to be enforced (with source badges)
         if structured_rules:
             prog.progress(38, text="📋 Rules ready…")
-            src_badge_html = {
-                "User"        : '<span class="src-badge src-user">USER</span>',
-                "Document"    : '<span class="src-badge src-doc">DOC</span>',
-                "Wikipedia"   : '<span class="src-badge src-wiki">WIKI</span>',
-                "DuckDuckGo"  : '<span class="src-badge src-ddg">DDG</span>',
-                "Web Search"  : '<span class="src-badge" style="background:rgba(100,180,232,0.14);color:#64b4e8;">WEB</span>',
-                "Google Search": '<span class="src-badge" style="background:rgba(80,200,120,0.14);color:#50c878;">GOOG</span>',
-                "Custom URL"  : '<span class="src-badge" style="background:rgba(200,150,232,0.14);color:#c896e8;">URL</span>',
-                # Research-derived rules use these source names
-                "Research"    : '<span class="src-badge" style="background:rgba(138,110,200,0.14);color:#a88ecc;">RES</span>',
-                ""            : '<span class="src-badge src-user">USER</span>',
-            }
-            def _src_badge(sn):
-                """Return the right badge for any source name, with smart fallback."""
-                if sn in src_badge_html:
-                    return src_badge_html[sn]
-                # Partial-match fallbacks so new source names don't show raw truncation
-                _sl = sn.lower()
-                if "wiki" in _sl:
-                    return src_badge_html["Wikipedia"]
-                if "duck" in _sl or "ddg" in _sl:
-                    return src_badge_html["DuckDuckGo"]
-                if "google" in _sl:
-                    return src_badge_html["Google Search"]
-                if "web" in _sl or "search" in _sl:
-                    return src_badge_html["Web Search"]
-                if "url" in _sl or "http" in _sl:
-                    return src_badge_html["Custom URL"]
-                if "doc" in _sl or "upload" in _sl:
-                    return src_badge_html["Document"]
-                # Generic fallback with full abbreviated label, not just 4 chars
-                _abbr = sn.upper()[:5] if sn else "SRC"
-                return (f'<span class="src-badge" style="background:rgba(180,180,180,0.12);'
-                        f'color:rgba(232,228,220,0.55);">{_abbr}</span>')
             chips = '<div class="rules-container" style="margin-bottom:0.8rem;">'
             for i, r in enumerate(structured_rules):
                 sn     = r.get("source_name", "User")
@@ -2024,19 +2037,6 @@ with col_right:
 
             # ── 4a. Rules enforced (with source badges) ───────────────────────
             st.markdown("**Rules enforced in this run:**")
-            src_colors = {
-                "User":"src-user","Document":"src-doc",
-                "Wikipedia":"src-wiki","DuckDuckGo":"src-ddg",
-                "Web Search":"src-ddg","Google Search":"src-wiki",
-                "Custom URL":"src-doc","Research":"src-wiki","":"src-user",
-            }
-            def _insight_sc(sn):
-                if sn in src_colors: return src_colors[sn]
-                sl = sn.lower()
-                if "wiki" in sl: return "src-wiki"
-                if "duck" in sl or "ddg" in sl: return "src-ddg"
-                if "doc" in sl or "url" in sl: return "src-doc"
-                return "src-user"
             for i, r in enumerate(sr_list):
                 sn    = r.get("source_name","User")
                 sc    = _insight_sc(sn)
@@ -2215,31 +2215,22 @@ with col_right:
                 st.markdown('<div class="section-label">🌐 Research Sources Used</div>', unsafe_allow_html=True)
                 st.caption(f"{len(sources)} source(s) fetched during this run — click any URL to open the original page.")
                 for _si, src in enumerate(sources):
-                    _sn    = src.get("source_name","Source")
-                    _title = src.get("title","")
+                    _sn    = src.get("source_name", "Source")
+                    _title = src.get("title", "")
                     _ref   = (src.get("reference","") or src.get("source","") or "").strip()
                     _ctx   = src.get("context","")
                     _badge = _src_badge(_sn)
-                    _title_e = _title.replace("&","&amp;").replace("<","&lt;")
-                    with st.expander(f"[{_si+1}] {_sn} — {_title}", expanded=False):
-                        # Full clickable URL on its own line
+                    with st.expander(f"📖 [{_si+1}] {_sn} — {_title}", expanded=False):
+                        # Context body — same style as original
+                        if _ctx:
+                            st.write(_ctx[:600] + ("…" if len(_ctx) > 600 else ""))
+                        # Full URL as a clickable pill — original style, full URL not truncated
                         if _ref and _ref not in ("None","none",""):
                             st.markdown(
-                                f'<div style="margin-bottom:0.6rem;">'
-                                f'<span style="font-size:0.68rem;color:rgba(232,228,220,0.4);">URL: </span>'
-                                f'<a href="{_ref}" target="_blank" '
-                                f'style="font-family:DM Mono,monospace;font-size:0.75rem;'
-                                f'color:#6496e8;word-break:break-all;">{_ref}</a></div>',
+                                f'<a class="ref-pill" href="{_ref}" target="_blank" '
+                                f'style="word-break:break-all;">🔗 {_ref}</a>',
                                 unsafe_allow_html=True,
                             )
-                        # Context snippet
-                        st.markdown(
-                            f'<div style="font-size:0.8rem;color:rgba(232,228,220,0.6);'
-                            f'line-height:1.65;padding:0.6rem 0.8rem;'
-                            f'background:rgba(255,255,255,0.02);border-radius:8px;">'
-                            f'{_ctx[:600].replace("<","&lt;")}{"…" if len(_ctx)>600 else ""}</div>',
-                            unsafe_allow_html=True,
-                        )
             else:
                 st.info("No research sources in this run.")
 
