@@ -44,22 +44,28 @@ _FAILED_PREFIXES = (
 def _is_valid_source(src: dict) -> bool:
     """
     Return True only if this source dict contains genuine retrievable content.
-    Filters out _failed() returns, empty fetches, and error messages.
+
+    Rules:
+    - Context must be at least 80 non-trivial characters (error messages are short)
+    - Context must not be a known failure string or start with a failure prefix
+    - Does NOT require a URL — some DDGS/web results omit href; content is still valid
+    - The reference field being 'None' (string) or empty is allowed as long as
+      content is genuine (the citation block in the draft will just omit the URL)
     """
-    ctx = src.get("context", "").strip()
-    ref = (src.get("reference","") or "").strip()
-    sn  = (src.get("source_name","") or "").strip()
-    # Must have non-trivial context
-    if len(ctx) < 50:
+    ctx = (src.get("context") or "").strip()
+
+    # Must have meaningful content
+    if len(ctx) < 80:
         return False
-    # Must not be a known failure message
+
+    # Must not be an exact known failure string
     if ctx in _FAILED_CONTEXTS:
         return False
+
+    # Must not start with a failure/error prefix
     if any(ctx.startswith(p) for p in _FAILED_PREFIXES):
         return False
-    # Must have a real URL (not 'None' or empty)
-    if not ref or ref.lower() in ("none", ""):
-        return False
+
     return True
 
 # ── URL categories that cannot be scraped for text content ────────────────────
