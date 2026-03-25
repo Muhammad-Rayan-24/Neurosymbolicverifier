@@ -1499,8 +1499,28 @@ with col_right:
 
             # ── Generate draft (skip if audit-only) ───────────────────────────
             if not audit_only:
-                ctx_parts = [f"[{s.get('source_name','Source')}] {s['context']}"
-                             for s in source_results]
+                # Build numbered source reference list so the LLM can cite by
+                # [Source N] in its draft.  Include title + URL for each source.
+                ctx_parts = []
+                _src_ref_lines = []   # Used in citation instruction below
+                for _si, s in enumerate(source_results):
+                    _sn    = s.get("source_name", "Source")
+                    _title = s.get("title", "")
+                    _url   = (s.get("reference","") or s.get("source","") or "").strip()
+                    _ctx   = s.get("context","")
+                    _label = f"[Source {_si+1}]"
+                    _hdr   = f"{_label} {_sn}"
+                    if _title: _hdr += f" — {_title}"
+                    if _url and _url not in ("None","none",""):
+                        _hdr += f"\nURL: {_url}"
+                    ctx_parts.append(f"{_hdr}\n{_ctx}")
+                    # Build citation reference line for the instruction
+                    _ref_str = f"  {_label} {_sn}"
+                    if _title: _ref_str += f" — {_title}"
+                    if _url and _url not in ("None","none",""):
+                        _ref_str += f" ({_url})"
+                    _src_ref_lines.append(_ref_str)
+
                 if memory_context:
                     ctx_parts.append("Relevant constraints:\n" + "\n".join(memory_context))
 
@@ -1568,11 +1588,27 @@ with col_right:
                 else:
                     _doc_block = ""
 
+                # Build citation instruction if we have sources with URLs
+                _citation_block = ""
+                if _src_ref_lines:
+                    _citation_block = (
+                        f"\n\nSOURCE CITATION REQUIREMENTS:\n"
+                        f"The following sources were retrieved for this query. "
+                        f"You MUST cite them inline in your response using [Source N] notation "
+                        f"wherever you use information from them.\n"
+                        f"At the end of your response, include a 'References' section that "
+                        f"lists each source you cited with its full URL.\n"
+                        f"Sources available:\n"
+                        + "\n".join(_src_ref_lines)
+                        + "\n"
+                    )
+
                 gen_prompt = (
                     f"You are generating content for a user request. "
                     f"You MUST satisfy every constraint below.\n\n"
                     f"USER REQUEST:\n{user_prompt}\n\n"
                     f"{constraint_block}\n"
+                    f"{_citation_block}"
                     f"{violation_feedback}"
                     f"{_doc_block}\n\n"
                     f"ADDITIONAL CONTEXT FROM RESEARCH:\n"
@@ -2176,13 +2212,34 @@ with col_right:
         with tabs[5]:
             sources = res.get("sources", [])
             if sources:
-                st.markdown('<div class="section-label">🌐 Research Sources</div>', unsafe_allow_html=True)
-                for src in sources:
-                    with st.expander(f"📖 {src.get('source_name','Source')} — {src.get('title','')}"):
-                        st.write(src.get("context",""))
-                        ref = src.get("reference","")
-                        if ref and ref != "None":
-                            st.markdown(f'<a class="ref-pill" href="{ref}" target="_blank">🔗 {ref[:65]}</a>', unsafe_allow_html=True)
+                st.markdown('<div class="section-label">🌐 Research Sources Used</div>', unsafe_allow_html=True)
+                st.caption(f"{len(sources)} source(s) fetched during this run — click any URL to open the original page.")
+                for _si, src in enumerate(sources):
+                    _sn    = src.get("source_name","Source")
+                    _title = src.get("title","")
+                    _ref   = (src.get("reference","") or src.get("source","") or "").strip()
+                    _ctx   = src.get("context","")
+                    _badge = _src_badge(_sn)
+                    _title_e = _title.replace("&","&amp;").replace("<","&lt;")
+                    with st.expander(f"[{_si+1}] {_sn} — {_title}", expanded=False):
+                        # Full clickable URL on its own line
+                        if _ref and _ref not in ("None","none",""):
+                            st.markdown(
+                                f'<div style="margin-bottom:0.6rem;">'
+                                f'<span style="font-size:0.68rem;color:rgba(232,228,220,0.4);">URL: </span>'
+                                f'<a href="{_ref}" target="_blank" '
+                                f'style="font-family:DM Mono,monospace;font-size:0.75rem;'
+                                f'color:#6496e8;word-break:break-all;">{_ref}</a></div>',
+                                unsafe_allow_html=True,
+                            )
+                        # Context snippet
+                        st.markdown(
+                            f'<div style="font-size:0.8rem;color:rgba(232,228,220,0.6);'
+                            f'line-height:1.65;padding:0.6rem 0.8rem;'
+                            f'background:rgba(255,255,255,0.02);border-radius:8px;">'
+                            f'{_ctx[:600].replace("<","&lt;")}{"…" if len(_ctx)>600 else ""}</div>',
+                            unsafe_allow_html=True,
+                        )
             else:
                 st.info("No research sources in this run.")
 
