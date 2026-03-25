@@ -260,6 +260,13 @@ def _wiki_fetch(search_query, original_query, api_key=None, llm_config=None):
 
 
 def _ddg_fetch(search_query):
+    """
+    DuckDuckGo source.  Two-tier:
+    1. Instant Answer API (api.duckduckgo.com) — fast, free, works for famous topics.
+    2. DDGS full web search fallback — if Instant Answer returns nothing, tries a
+       real DDGS search and returns the first usable snippet.  This means the
+       DuckDuckGo (instant) checkbox now reliably returns something for any query.
+    """
     try:
         encoded = urllib.parse.quote_plus(search_query)
         url     = (f'https://api.duckduckgo.com/?q={encoded}'
@@ -271,10 +278,11 @@ def _ddg_fetch(search_query):
         abs_url  = data.get('AbstractURL','').strip()
         abs_src  = data.get('AbstractSource','DuckDuckGo')
         if abstract and len(abstract) > 80:
-            encoded_q = urllib.parse.quote_plus(search_query)
-            ref = abs_url or f'https://duckduckgo.com/?q={encoded_q}'
-            print(f'   \u2705 DuckDuckGo ({abs_src}): {abs_url or "N/A"}')
-            return {'context': abstract, 'reference': ref, 'title': data.get('Heading', search_query)}
+            ref = abs_url or f'https://duckduckgo.com/?q={encoded}'
+            print(f'   \u2705 DuckDuckGo instant ({abs_src}): {abs_url or "N/A"}')
+            return {'context': abstract, 'reference': ref,
+                    'title': data.get('Heading', search_query),
+                    'source_name': 'DuckDuckGo'}
         snippets = []
         for item in data.get('RelatedTopics', []):
             if isinstance(item, dict):
@@ -286,13 +294,38 @@ def _ddg_fetch(search_query):
                         t = sub.get('Text','').strip()
                         if t and len(t) > 40: snippets.append(t)
         if snippets:
-            print('   \u2705 DuckDuckGo: related topics fallback')
+            print('   \u2705 DuckDuckGo instant: related topics fallback')
             return {'context': ' '.join(snippets[:4]),
                     'reference': f'https://duckduckgo.com/?q={encoded}',
-                    'title': search_query}
-        return _failed('DuckDuckGo returned no usable content.')
+                    'title': search_query,
+                    'source_name': 'DuckDuckGo'}
     except Exception as e:
-        return _failed(f'DuckDuckGo failed: {e}')
+        print(f'   [M4] DuckDuckGo instant API failed: {e}')
+
+    # ── Tier 2: DDGS full web search fallback ────────────────────────────────
+    # The instant API only works for famous topics. For everything else, fall
+    # back to a real DDGS search and return the first good result as a snippet.
+    print(f'   [M4] DuckDuckGo instant returned nothing — trying DDGS fallback...')
+    try:
+        from duckduckgo_search import DDGS
+        with DDGS() as ddgs:
+            hits = list(ddgs.text(search_query, max_results=5))
+        for hit in hits:
+            body = hit.get('body', '').strip()
+            href = hit.get('href', '')
+            title = hit.get('title', search_query)
+            if body and len(body) >= 80:
+                print(f'   \u2705 DuckDuckGo DDGS fallback: {href[:60]}')
+                return {'context': body[:4000],
+                        'reference': href,
+                        'title': title,
+                        'source_name': 'DuckDuckGo'}
+    except ImportError:
+        pass  # duckduckgo-search not installed — that's fine
+    except Exception as e:
+        print(f'   [M4] DuckDuckGo DDGS fallback failed: {e}')
+
+    return _failed('DuckDuckGo returned no usable content.')
 
 
 def _url_fetch(url, original_query, api_key=None, llm_config=None):
