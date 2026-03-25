@@ -1334,12 +1334,15 @@ with col_right:
                     if source_results:
                         print(f"   [App] {len(source_results)} valid source(s) from {len(_raw_sources)} fetched ({_skipped} failed/empty filtered).")
                     elif _raw_sources:
-                        # Research ran but ALL results were failures — tell the user
+                        # All sources were filtered — log raw contexts for diagnosis
+                        print(f"   [App] ALL {len(_raw_sources)} source(s) filtered. Raw contexts:")
+                        for _rs in _raw_sources:
+                            print(f"      → {(_rs.get('context',''))[:120]!r}")
                         st.warning(
                             f"⚠️ **Web research ran but returned no usable content.** "
                             f"{len(_raw_sources)} fetch attempt(s) all failed or returned empty pages. "
-                            f"The pipeline will continue using only your rules. "
-                            f"Try enabling different research sources or check your internet connection.",
+                            f"Check the Streamlit Cloud logs for the exact failure reason. "
+                            f"The pipeline will continue using only your rules.",
                             icon="🌐"
                         )
                     results["sources"] = source_results
