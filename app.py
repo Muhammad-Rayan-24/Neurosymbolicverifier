@@ -921,9 +921,9 @@ with col_left:
                                     key="use_wikipedia",
                                     help="Search Wikipedia and derive rules from the best matching article.")
     with _src_r1c2:
-        use_duckduckgo = st.checkbox("🦆 DuckDuckGo (instant)", value=not _has_doc,
+        use_duckduckgo = st.checkbox("🦆 DuckDuckGo (instant + DDGS fallback)", value=not _has_doc,
                                      key="use_duckduckgo",
-                                     help="DuckDuckGo instant answer API — fast topic snippet.")
+                                     help="DuckDuckGo instant answer API with automatic DDGS full-search fallback. Works for any topic. For deeper multi-page research, also enable 'Web Search (DuckDuckGo, top 5)' below.")
 
     # Row 2: Full web search options
     _src_r2c1, _src_r2c2 = st.columns(2)
