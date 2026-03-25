@@ -12,11 +12,55 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 _TOPIC_CACHE  : dict = {}
 _CLIENT_CACHE : dict = {}
 _O_SERIES = {'o3','o3-pro','o3-mini','o4-mini','o1','o1-mini','o1-pro'}
+
+# Exact failure context strings returned by _failed()
 _FAILED_CONTEXTS = frozenset([
     'No Wikipedia results found.',
     'No relevant Wikipedia results found.',
     'DuckDuckGo returned no usable content.',
 ])
+
+# Prefixes that mark a result as a failed/unusable fetch — checked with startswith()
+# so new error messages from _failed() are caught without needing to enumerate them all.
+_FAILED_PREFIXES = (
+    "No Wikipedia",
+    "No relevant Wikipedia",
+    "DuckDuckGo returned",
+    "Web search returned",
+    "Web search:",
+    "Wikipedia search failed",
+    "DuckDuckGo failed",
+    "Failed to fetch",
+    "HTTP ",
+    "URL error",
+    "PDF at ",
+    "VIDEO URL BLOCKED",
+    "JS-ONLY URL BLOCKED",
+    "Google Search returned",
+    "Google Search API failed",
+    "Google Search: could not",
+)
+
+def _is_valid_source(src: dict) -> bool:
+    """
+    Return True only if this source dict contains genuine retrievable content.
+    Filters out _failed() returns, empty fetches, and error messages.
+    """
+    ctx = src.get("context", "").strip()
+    ref = (src.get("reference","") or "").strip()
+    sn  = (src.get("source_name","") or "").strip()
+    # Must have non-trivial context
+    if len(ctx) < 50:
+        return False
+    # Must not be a known failure message
+    if ctx in _FAILED_CONTEXTS:
+        return False
+    if any(ctx.startswith(p) for p in _FAILED_PREFIXES):
+        return False
+    # Must have a real URL (not 'None' or empty)
+    if not ref or ref.lower() in ("none", ""):
+        return False
+    return True
 
 # ── URL categories that cannot be scraped for text content ────────────────────
 # Video platforms: JS-rendered players, no transcript in plain HTML.
