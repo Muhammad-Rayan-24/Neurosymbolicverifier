@@ -44,27 +44,25 @@ _FAILED_PREFIXES = (
 def _is_valid_source(src: dict) -> bool:
     """
     Return True only if this source dict contains genuine retrievable content.
-
-    Rules:
-    - Context must be at least 80 non-trivial characters (error messages are short)
-    - Context must not be a known failure string or start with a failure prefix
-    - Does NOT require a URL — some DDGS/web results omit href; content is still valid
-    - The reference field being 'None' (string) or empty is allowed as long as
-      content is genuine (the citation block in the draft will just omit the URL)
+    Single source of truth — used both inside M4 and in app.py filtering.
     """
     ctx = (src.get("context") or "").strip()
 
-    # Must have meaningful content
-    if len(ctx) < 80:
+    # Must have meaningful content (60 chars covers a short but real paragraph)
+    if len(ctx) < 60:
+        print(f"   [M4/filter] Rejected — too short ({len(ctx)} chars): {ctx[:60]!r}")
         return False
 
     # Must not be an exact known failure string
     if ctx in _FAILED_CONTEXTS:
+        print(f"   [M4/filter] Rejected — known failure string: {ctx[:80]!r}")
         return False
 
-    # Must not start with a failure/error prefix
-    if any(ctx.startswith(p) for p in _FAILED_PREFIXES):
-        return False
+    # Must not start with any failure prefix
+    for p in _FAILED_PREFIXES:
+        if ctx.startswith(p):
+            print(f"   [M4/filter] Rejected — failure prefix {p!r}: {ctx[:80]!r}")
+            return False
 
     return True
 
@@ -174,24 +172,24 @@ def research_all_sources(query_text, api_key=None, llm_config=None, research_con
             t0 = time.perf_counter()
             wiki_result = tasks['wiki'].result()
             print(f'   [M4] Wikipedia fetched in {time.perf_counter()-t0:.2f}s')
-            if wiki_result['context'] not in _FAILED_CONTEXTS:
+            if _is_valid_source(wiki_result):
                 wiki_result['source_name'] = 'Wikipedia'
                 results.append(wiki_result)
             else:
-                print('   [M4] Wikipedia: no usable result.')
+                print(f'   [M4] Wikipedia: no usable result — {wiki_result.get("context","")[:80]}')
 
         if 'ddg' in tasks:
             t0 = time.perf_counter()
             ddg_result = tasks['ddg'].result()
             print(f'   [M4] DuckDuckGo fetched in {time.perf_counter()-t0:.2f}s')
-            if ddg_result['context'] not in _FAILED_CONTEXTS:
+            if _is_valid_source(ddg_result):
                 if wiki_result is None or not _same_topic(ddg_result, wiki_result):
                     ddg_result['source_name'] = 'DuckDuckGo'
                     results.append(ddg_result)
                 else:
                     print('   [M4] DuckDuckGo: same topic as Wikipedia -- skipping.')
             else:
-                print('   [M4] DuckDuckGo: no usable result.')
+                print(f'   [M4] DuckDuckGo: no usable result — {ddg_result.get("context","")[:80]}')
 
         for i in range(len(custom_urls)):
             key_name = f'url_{i}'
@@ -199,30 +197,31 @@ def research_all_sources(query_text, api_key=None, llm_config=None, research_con
                 t0 = time.perf_counter()
                 url_result = tasks[key_name].result()
                 print(f'   [M4] Custom URL {i+1} fetched in {time.perf_counter()-t0:.2f}s')
-                if url_result['context'] not in _FAILED_CONTEXTS:
+                if _is_valid_source(url_result):
                     url_result['source_name'] = 'Custom URL'
                     results.append(url_result)
                 else:
-                    print(f"   [M4] Custom URL {i+1}: {url_result['context']}")
+                    print(f"   [M4] Custom URL {i+1} failed: {url_result.get('context','')[:80]}")
 
         if 'web' in tasks:
             t0 = time.perf_counter()
             web_results = tasks['web'].result()
             print(f'   [M4] Web search completed in {time.perf_counter()-t0:.2f}s')
             for wr in web_results:
-                if wr['context'] not in _FAILED_CONTEXTS:
+                if _is_valid_source(wr):
                     results.append(wr)
                 else:
-                    print(f"   [M4] Web search: {wr['context']}")
+                    print(f"   [M4] Web result filtered: {wr.get('context','')[:80]}")
+
         if 'google' in tasks:
             t0 = time.perf_counter()
             google_results = tasks['google'].result()
             print(f'   [M4] Google Search completed in {time.perf_counter()-t0:.2f}s')
             for gr in google_results:
-                if gr['context'] not in _FAILED_CONTEXTS:
+                if _is_valid_source(gr):
                     results.append(gr)
                 else:
-                    print(f"   [M4] Google: {gr['context']}")
+                    print(f"   [M4] Google result filtered: {gr.get('context','')[:80]}")
     return results
 
 
