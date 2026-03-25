@@ -1317,7 +1317,13 @@ with col_right:
 
             if "research" in futures:
                 try:
-                    source_results = futures["research"].result()
+                    _raw_sources   = futures["research"].result()
+                    # Filter out failed/empty fetch results — only keep genuine sources
+                    source_results = [s for s in _raw_sources
+                                      if m4._is_valid_source(s)]
+                    if len(_raw_sources) != len(source_results):
+                        _skipped = len(_raw_sources) - len(source_results)
+                        print(f"   [App] Filtered {_skipped} failed source(s) from results.")
                     results["sources"] = source_results
                 except Exception as e:
                     st.warning(f"M4 research failed (non-fatal): {e}")
@@ -2210,7 +2216,10 @@ with col_right:
 
         # ── Tab 6: Sources ────────────────────────────────────────────────────
         with tabs[5]:
-            sources = res.get("sources", [])
+            sources = [s for s in res.get("sources", [])
+                       if s.get("context","").strip()
+                       and len(s.get("context","").strip()) >= 50
+                       and (s.get("reference","") or "").strip().lower() not in ("","none")]
             if sources:
                 st.markdown('<div class="section-label">🌐 Research Sources Used</div>', unsafe_allow_html=True)
                 st.caption(f"{len(sources)} source(s) fetched during this run — click any URL to open the original page.")
