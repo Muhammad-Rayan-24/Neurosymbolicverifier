@@ -729,6 +729,34 @@ def _diff_sentences(text_a: str, text_b: str) -> str:
     return {"added": adds[:6], "removed": removes[:6]}
 
 
+def _clean_draft_for_display(text: str) -> str:
+    """
+    Strip the CONSTRAINT VERIFICATION LABELS block from a draft before
+    displaying it in the Draft tab or rendering it to PDF.
+
+    The block starts at the '---' separator line followed by
+    'CONSTRAINT VERIFICATION LABELS' (case-insensitive) and extends to
+    the end of the document.  It is audit machinery and should never
+    appear in the user-facing draft PDF or Draft tab.
+    """
+    import re as _re2
+    # Match the separator + header + everything after (dotall)
+    cleaned = _re2.sub(
+        r'\n*-{3,}\s*\n+CONSTRAINT VERIFICATION LABELS.*',
+        '',
+        text,
+        flags=_re2.IGNORECASE | _re2.DOTALL,
+    ).rstrip()
+    # Also handle case where header appears without a preceding ---
+    cleaned = _re2.sub(
+        r'\n*CONSTRAINT VERIFICATION LABELS\s*\n.*',
+        '',
+        cleaned,
+        flags=_re2.IGNORECASE | _re2.DOTALL,
+    ).rstrip()
+    return cleaned
+
+
 # ── Source badge helpers — module-level so they're available in ALL tabs ──────
 # Defined here (not inside the pipeline block) so they remain in scope when
 # Streamlit re-renders the results tabs on subsequent page loads.
@@ -1631,13 +1659,28 @@ with col_right:
                 # Build citation instruction if we have sources with URLs
                 _citation_block = ""
                 if _src_ref_lines:
+                    _n_sources = len(_src_ref_lines)
+                    if _n_sources == 1:
+                        # Single source: cite once per section/paragraph, not every sentence
+                        _cite_style = (
+                            "CITATION STYLE — SINGLE SOURCE: Since there is only one source, "
+                            "do NOT cite it after every sentence. Cite it once at the end of "
+                            "each major section or paragraph where you draw from it. "
+                            "Write naturally as an author — the source underpins the whole piece."
+                        )
+                    else:
+                        # Multiple sources: cite by number where content comes from a specific source
+                        _cite_style = (
+                            "CITATION STYLE — MULTIPLE SOURCES: Use [Source N] at the end of "
+                            "sentences or paragraphs where the specific information comes from "
+                            "that source. Cite naturally — not after every sentence."
+                        )
                     _citation_block = (
                         f"\n\nSOURCE CITATION REQUIREMENTS:\n"
                         f"The following sources were retrieved for this query. "
-                        f"You MUST cite them inline in your response using [Source N] notation "
-                        f"wherever you use information from them.\n"
-                        f"At the end of your response, include a 'References' section that "
-                        f"lists each source you cited with its full URL.\n"
+                        f"At the end of your response, include a 'References' section "
+                        f"listing each source you cited with its full URL.\n"
+                        f"{_cite_style}\n"
                         f"Sources available:\n"
                         + "\n".join(_src_ref_lines)
                         + "\n"
@@ -1656,6 +1699,14 @@ with col_right:
                     + "\n\nGenerate a detailed, helpful response that explicitly states "
                       "all relevant values as numbers and uses the exact variable labels "
                       "specified in the constraints above.\n\n"
+                      "WRITING STYLE — CRITICAL:\n"
+                      "Write in natural, fluent prose as a knowledgeable author would. "
+                      "Satisfy every constraint through the substance of your content — "
+                      "do NOT satisfy constraints by verbatim-stating counts or thresholds "
+                      "inside the prose (e.g. do NOT write '1 neural method', '3 benefits', "
+                      "'at least 2 researchers' — just write about those things naturally). "
+                      "The auditor extracts values from your text; you do not need to "
+                      "label them explicitly for the reader.\n\n"
                       "FORMATTING RULES — READ CAREFULLY:\n"
                       "1. Do NOT start your response with a block of constraint flag lines "
                       "(lines like `variable_name: true` or `variable_name: false`). "
@@ -1917,8 +1968,12 @@ with col_right:
         with tabs[1]:
             draft = res.get("draft", "")
             if draft:
+                # Strip constraint verification labels block — audit machinery,
+                # not content. The raw draft (with labels) is used for auditing
+                # internally but the display + PDF should be clean.
+                draft_display = _clean_draft_for_display(draft)
                 st.markdown('<div class="section-label">✍ Final Verified Draft</div>', unsafe_allow_html=True)
-                safe = draft.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+                safe = draft_display.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
                 st.markdown(f'<div class="gen-output">{safe}</div>', unsafe_allow_html=True)
                 # ── Download buttons — always show TXT, show PDF if generation succeeds ──
                 dl_col1, dl_col2 = st.columns(2)
@@ -1927,7 +1982,7 @@ with col_right:
                 with dl_col1:
                     st.download_button(
                         "⬇ Download as TXT",
-                        data      = draft,
+                        data      = draft_display,
                         file_name = f"{_topic_slug}_{res.get('run_id','output')}.txt",
                         mime      = "text/plain",
                         key       = "dl_draft_txt",
@@ -1938,7 +1993,7 @@ with col_right:
                 with dl_col2:
                     try:
                         _pdf_bytes = _draft_to_pdf(
-                            draft,
+                            draft_display,
                             run_id          = res.get("run_id", ""),
                             ltn_score       = res.get("ltn_score"),
                             rules_passed    = sum(1 for r in res.get("audit",[]) if r.get("satisfies")),
