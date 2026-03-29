@@ -285,6 +285,17 @@ For BOOLEAN/QUALITATIVE rules: rate the actual quality of compliance 0–1.
   "Every fact must have a source" with 7/10 facts cited → 0.7
   "Report must be up to date" with mostly 2023 sources → 0.8
 
+CRITICAL — COUNT-TYPE RULES:
+  For rules containing phrases like "referenced for >= N", "mentioned >= N",
+  "cited >= N times", "must appear >= N", "included for >= N [items]" —
+  extracted_value_num MUST be the COUNT of matching items found in the text,
+  NOT the value of those items.
+  Example: "casualty ratio data must be referenced for >= 1 conflict"
+    → Find how many conflicts have casualty ratio data cited.
+    → If 2 conflicts have ratio data: extracted_value_num = 2, NOT the ratio itself.
+  Example: "must mention at least 3 researchers"
+    → Count researchers mentioned: extracted_value_num = 4 (if 4 found).
+
 UNIT NORMALIZATION: convert to constraint unit before comparing.
   Example: "45 minutes" with unit "hours" → extracted_value_num = 0.75
 
@@ -307,7 +318,10 @@ Rules:
 - Respect SCOPE instructions — checking wrong occurrence = verification error
 - Normalise units BEFORE comparing
 - If variable not found → compliance_score=0.0, satisfies=false
-- For strict rules: < 10 and value==10 → compliance_score=0.0"""
+- For strict rules: < 10 and value==10 → compliance_score=0.0
+- NEVER set satisfies=false while also writing an explanation that confirms the
+  rule is met — if your explanation says the rule passes, compliance_score must
+  be >= 0.5 and satisfies must be true."""
 
     try:
         t0  = time.perf_counter()
@@ -482,8 +496,29 @@ def _build_result(idx: int, rule: dict, llm_res: dict | None) -> dict:
         # satisfies (boolean) uses the ACTUAL symbolic comparison result —
         # not the graded threshold — so 498 <= 400 is correctly False even
         # though the graded score is 0.755.
-        final_compliance = symbolic_score
-        final_satisfies  = bool(symbolic_override)   # exact boolean, not graded threshold
+
+        # ── Contradiction guard ──────────────────────────────────────────────
+        # If the symbolic check says FAIL (score=0 or very low) but the LLM
+        # auditor's own explanation clearly confirms the rule IS satisfied
+        # (compliance_score >= 0.8 AND satisfies=True), this indicates the
+        # auditor extracted the wrong number (e.g. extracted a ratio value
+        # instead of a count of items for a count-type rule).
+        # In this case, trust the semantic result — the LLM's explanation is
+        # a stronger signal than a mis-extracted numeric value.
+        _semantic_confident_pass = (
+            llm_compliance >= 0.8
+            and llm_res.get("satisfies", False) is True
+            and symbolic_score <= 0.1          # symbolic says hard fail
+            and not bool(symbolic_override)    # exact comparison is False
+        )
+        if _semantic_confident_pass:
+            print(f"   R{idx+1} CONTRADICTION RESOLVED (semantic overrides symbolic) "
+                  f"— sym_score={symbolic_score:.2f} but LLM score={llm_compliance:.2f}")
+            final_compliance = llm_compliance
+            final_satisfies  = True
+        else:
+            final_compliance = symbolic_score
+            final_satisfies  = bool(symbolic_override)
     else:
         # Semantic LLM score for boolean/categorical rules
         final_compliance = llm_compliance
