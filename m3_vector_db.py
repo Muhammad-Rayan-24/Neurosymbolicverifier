@@ -16,12 +16,22 @@ from datetime import datetime
 # ============================================================
 
 # ── Qdrant Cloud credentials ──────────────────────────────────────────────────
-# Edit these two lines to point at your Qdrant instance.
-# Leave QDRANT_URL as "" to use fast in-memory Qdrant (no persistence).
-# When QDRANT_URL is set all runs are persisted in the cloud cluster and
-# every record is tagged with a run_id so queries never bleed across runs.
-QDRANT_URL     = "https://d217835b-8105-4b9b-a47d-439ff47e0a44.sa-east-1-0.aws.cloud.qdrant.io"
-QDRANT_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.ZeQ9egz-8PwY5US-q_mAxhw1dEEwPWzEhFyg5KaDLuM"
+# Set these via environment variables or Streamlit secrets — do NOT hardcode them
+# here as this file is committed to a public repository.
+#
+# Environment variables (recommended for Streamlit Cloud):
+#   QDRANT_URL     — e.g. "https://<cluster-id>.<region>.aws.cloud.qdrant.io"
+#   QDRANT_API_KEY — your Qdrant API key / JWT token
+#
+# Streamlit secrets (secrets.toml or Streamlit Cloud secrets panel):
+#   [secrets]
+#   QDRANT_URL = "https://..."
+#   QDRANT_API_KEY = "..."
+#
+# Leave both as "" to use fast in-memory Qdrant (no persistence, no credentials needed).
+import os as _os
+QDRANT_URL     = _os.getenv("QDRANT_URL", "")
+QDRANT_API_KEY = _os.getenv("QDRANT_API_KEY", "")
 # ─────────────────────────────────────────────────────────────────────────────
 
 try:
@@ -385,7 +395,10 @@ def retrieve_context(client, query_text: str, n_results: int = 4,
         texts      = []
 
         for col in ("rules", "sources"):
-            count = client.get_collection(col).points_count
+            # Bug 8 fix: points_count can be None on cloud Qdrant under eventual
+            # consistency or with older client versions.  Guard with "or 0" so
+            # a None value doesn't silently skip collections that have data.
+            count = client.get_collection(col).points_count or 0
             if count == 0:
                 continue
 
@@ -456,7 +469,7 @@ def get_collection_stats(client) -> dict:
     stats = {}
     for name in _COLLECTIONS:
         try:
-            stats[name] = client.get_collection(name).points_count
+            stats[name] = client.get_collection(name).points_count or 0
         except Exception:
             stats[name] = 0
     return stats
