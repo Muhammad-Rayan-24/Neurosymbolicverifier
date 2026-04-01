@@ -1,6 +1,6 @@
 """
 NeuroSymbolic Verifier v3 -- Streamlit App
-Claude claude-sonnet-4-5 · sentence-transformers · Qdrant · Rewrite Loop · Insight Panel
+Claude claude-sonnet-4-6 · sentence-transformers · Qdrant · Rewrite Loop · Insight Panel
 """
 
 import streamlit as st
@@ -657,6 +657,20 @@ def _detect_contradictions(rules: list) -> list:
             by_var.setdefault(v, []).append(r)
 
     for var, group in by_var.items():
+        # ── Self-check: single inverted in_range rule ────────────────────────
+        # Runs before the pair loop so a lone malformed rule is caught even
+        # when there are no other rules for the same variable.
+        for r in group:
+            if r.get("operator") == "in_range":
+                la_r = r.get("threshold_low")
+                ha_r = r.get("threshold_high")
+                try:
+                    if la_r is not None and ha_r is not None and float(la_r) > float(ha_r):
+                        contradictions.append({"rule_a": r, "rule_b": r,
+                            "reason": f"Impossible range for '{var}': [{la_r}, {ha_r}] — low > high"})
+                except (TypeError, ValueError):
+                    pass
+
         if len(group) < 2:
             continue
         for i, ra in enumerate(group):
@@ -699,12 +713,6 @@ def _detect_contradictions(rules: list) -> list:
                             contradictions.append({"rule_a": ra, "rule_b": rb,
                                 "reason": f"Impossible: {var} == {ta} AND {var} > {tb}"})
 
-                    # in_range where bounds are inverted
-                    if oa == "in_range" and la is not None and ha is not None:
-                        if float(la) > float(ha):
-                            contradictions.append({"rule_a": ra, "rule_b": ra,
-                                "reason": f"Impossible range: {var} in [{la}, {ha}] — low > high"})
-
                 except (TypeError, ValueError):
                     pass
 
@@ -740,16 +748,17 @@ def _clean_draft_for_display(text: str) -> str:
     appear in the user-facing draft PDF or Draft tab.
     """
     import re as _re2
-    # Match the separator + header + everything after (dotall)
+    # Pattern 1: separator line + header, with optional bold/heading prefix
+    # Also handles **CONSTRAINT VERIFICATION LABELS** and ## variants from thinking models
     cleaned = _re2.sub(
-        r'\n*-{3,}\s*\n+CONSTRAINT VERIFICATION LABELS.*',
+        r'\n*-{3,}\s*\n+(?:#{1,3}\s*|\*{1,2})?CONSTRAINT VERIFICATION LABELS(?:\*{1,2})?\s*\n.*',
         '',
         text,
         flags=_re2.IGNORECASE | _re2.DOTALL,
     ).rstrip()
-    # Also handle case where header appears without a preceding ---
+    # Pattern 2: header without a preceding --- (thinking models sometimes omit separator)
     cleaned = _re2.sub(
-        r'\n*CONSTRAINT VERIFICATION LABELS\s*\n.*',
+        r'\n*(?:#{1,3}\s*|\*{1,2})?CONSTRAINT VERIFICATION LABELS(?:\*{1,2})?\s*\n.*',
         '',
         cleaned,
         flags=_re2.IGNORECASE | _re2.DOTALL,
@@ -1208,66 +1217,67 @@ with col_right:
     # ══════════════════════════════════════════════════════════════════════════
     if run_btn and not st.session_state.get('_pipeline_running', False):
         st.session_state['_pipeline_running'] = True
-        if not api_key.strip():
-            st.error("⚠️ Please enter your Anthropic API key."); st.stop()
-        if not user_prompt.strip() and not existing_draft.strip():
-            st.error("⚠️ Please enter a prompt or paste an existing draft."); st.stop()
-
+        # try/finally guarantees the running flag is ALWAYS cleared even if
+        # st.stop() (StopException) or st.rerun() (RerunException) is raised
+        # mid-pipeline — without this the Run button locks permanently.
         try:
-            import anthropic as _anthropic
-        except ImportError:
-            st.error("`anthropic` not installed. Run: pip install anthropic"); st.stop()
+            if not api_key.strip():
+                st.error("⚠️ Please enter your Anthropic API key."); st.stop()
+            if not user_prompt.strip() and not existing_draft.strip():
+                st.error("⚠️ Please enter a prompt or paste an existing draft."); st.stop()
 
-        try:
-            import m2_llm_parser as m2
-        except ImportError as e:
-            st.error(f"Cannot import m2_llm_parser: {e}"); st.stop()
-
-        try:
-            import m3_vector_db as m3
-            has_m3 = True
-        except ImportError:
-            has_m3 = False
-            st.warning("⚠️ qdrant-client or sentence-transformers unavailable — memory step skipped.")
-
-        try:
-            import m4_agentic_router as m4
-            has_m4 = True
-        except ImportError:
-            has_m4 = False
-
-        try:
-            import m1_ltn_core as m1
-            has_ltn = True
-        except ImportError:
-            has_ltn = False
-
-        prog   = st.progress(0, text="Initialising…")
-        status = st.empty()
-        results = {}
-        run_id  = str(uuid.uuid4())[:8]
-        rules_snapshot = list(st.session_state.rules)
-
-        # ── Init Qdrant ───────────────────────────────────────────────────────
-        qdrant_client = None
-        if has_m3:
             try:
-                qdrant_client = m3.setup_memory(url=qdrant_url, qdrant_api_key=qdrant_key)
-                st.session_state.qdrant_client = qdrant_client
-            except Exception as e:
-                st.warning(f"Qdrant init failed (non-fatal): {e}")
+                import anthropic as _anthropic
+            except ImportError:
+                st.error("`anthropic` not installed. Run: pip install anthropic"); st.stop()
+
+            try:
+                import m2_llm_parser as m2
+            except ImportError as e:
+                st.error(f"Cannot import m2_llm_parser: {e}"); st.stop()
+
+            try:
+                import m3_vector_db as m3
+                has_m3 = True
+            except ImportError:
                 has_m3 = False
+                st.warning("⚠️ qdrant-client or sentence-transformers unavailable — memory step skipped.")
 
-        # ── PARALLEL: Research + Rule Parsing ─────────────────────────────────
-        source_results   = []
-        structured_rules = []
-        memory_context   = []
-        _web_research_enabled = st.session_state.get("use_web_research", True)
-        _doc_present = bool(existing_draft.strip())
+            try:
+                import m4_agentic_router as m4
+                has_m4 = True
+            except ImportError:
+                has_m4 = False
 
-        # Safe defaults — prevent NameError if session state keys are missing
-        # (can happen on first load or version mismatch during deployment)
-        if "_research_config" not in dir():
+            try:
+                import m1_ltn_core as m1
+                has_ltn = True
+            except ImportError:
+                has_ltn = False
+
+            prog   = st.progress(0, text="Initialising…")
+            status = st.empty()
+            results = {}
+            run_id  = str(uuid.uuid4())[:8]
+            rules_snapshot = list(st.session_state.rules)
+
+            # ── Init Qdrant ───────────────────────────────────────────────────────
+            qdrant_client = None
+            if has_m3:
+                try:
+                    qdrant_client = m3.setup_memory(url=qdrant_url, qdrant_api_key=qdrant_key)
+                    st.session_state.qdrant_client = qdrant_client
+                except Exception as e:
+                    st.warning(f"Qdrant init failed (non-fatal): {e}")
+                    has_m3 = False
+
+            # ── PARALLEL: Research + Rule Parsing ─────────────────────────────────
+            source_results   = []
+            structured_rules = []
+            memory_context   = []
+            _doc_present = bool(existing_draft.strip())
+
+            # Single authoritative research config — built once from session state
             _research_config = {
                 "wikipedia"      : st.session_state.get("use_wikipedia", not _doc_present),
                 "duckduckgo"     : st.session_state.get("use_duckduckgo", not _doc_present),
@@ -1276,612 +1286,611 @@ with col_right:
                 "google_cx"      : st.session_state.get("google_cx", "").strip(),
                 "web_search"     : st.session_state.get("use_web_search_full", False),
                 "custom_urls"    : [u.strip() for u in
-                                    st.session_state.get("custom_urls_input","").splitlines()
+                                    st.session_state.get("custom_urls_input", "").splitlines()
                                     if u.strip().startswith("http")],
             }
-        if "_any_research" not in dir():
             _any_research = any([
-                _research_config.get("wikipedia", True),
-                _research_config.get("duckduckgo", True),
-                _research_config.get("google", False),
-                _research_config.get("web_search", False),
-                bool(_research_config.get("custom_urls", [])),
+                _research_config["wikipedia"],
+                _research_config["duckduckgo"],
+                _research_config["google"],
+                _research_config["web_search"],
+                bool(_research_config["custom_urls"]),
             ])
-        _research_config = {
-            "wikipedia"  : st.session_state.get("use_wikipedia", not _doc_present),
-            "duckduckgo" : st.session_state.get("use_duckduckgo", not _doc_present),
-            "google"         : st.session_state.get("use_google_search", False),
-            "google_api_key" : st.session_state.get("google_api_key", "").strip(),
-            "google_cx"      : st.session_state.get("google_cx", "").strip(),
-            "web_search"     : st.session_state.get("use_web_search_full", False),
-            "custom_urls": [u.strip() for u in
-                            st.session_state.get("custom_urls_input","").splitlines()
-                            if u.strip().startswith("http")],
-        }
-        _any_research = any([
-            _research_config["wikipedia"],
-            _research_config["duckduckgo"],
-            _research_config["google"],
-            _research_config["web_search"],
-            bool(_research_config["custom_urls"]),
-        ])
-        do_research = (
-            has_m4
-            and mode in ["🔬 Full", "🌐 Research+Gen"]
-            and _any_research
-        )
-        do_rules    = bool(rules_snapshot)
-
-        # Warn if user has research sources checked but mode blocks research
-        if _any_research and not do_research and mode == "📐 Audit Only":
-            st.warning(
-                "⚠️ **Research sources are checked but mode is 'Audit Only'** — "
-                "web research is skipped in Audit Only mode. "
-                "Switch to **🔬 Full** or **🌐 Research+Gen** to use web research.",
-                icon="🔍"
+            do_research = (
+                has_m4
+                and mode in ["🔬 Full", "🌐 Research+Gen"]
+                and _any_research
             )
+            do_rules    = bool(rules_snapshot)
 
-        prog.progress(8, text="⚡ Research & rule parsing in parallel…")
-
-        def _run_research():
-            if not user_prompt.strip():
-                return []
-            return m4.research_all_sources(
-                user_prompt.strip(), api_key=api_key,
-                llm_config=llm_config, research_config=_research_config,
-            )
-
-        def _run_rule_parse():
-            return m2.parse_rules_parallel(rules_snapshot, api_key, llm_config=llm_config)
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            futures = {}
-            if do_research: futures["research"] = pool.submit(_run_research)
-            if do_rules:    futures["rules"]    = pool.submit(_run_rule_parse)
-
-            msgs = []
-            if "research" in futures:
-                _rc = _research_config if "_research_config" in dir() else {}
-                _srcs = [k for k,v in [
-                    ("Wikipedia",  _rc.get("wikipedia")),
-                    ("DuckDuckGo", _rc.get("duckduckgo")),
-                    ("Google",     _rc.get("google")),
-                    ("Web Search", _rc.get("web_search")),
-                ] if v] + ([f"{len(_rc.get('custom_urls',[]))} URL(s)"] if _rc.get("custom_urls") else [])
-                msgs.append("M4 researching: " + (", ".join(_srcs) if _srcs else "sources"))
-            if "rules"    in futures: msgs.append(f"M2 parsing {len(rules_snapshot)} rule(s)")
-            if msgs: status.info(" · ".join(msgs) + "…")
-
-            if "research" in futures:
-                try:
-                    _raw_sources   = futures["research"].result()
-                    # Filter out failed/empty fetch results — only keep genuine sources
-                    source_results = [s for s in _raw_sources
-                                      if m4._is_valid_source(s)]
-                    _skipped = len(_raw_sources) - len(source_results)
-                    if source_results:
-                        print(f"   [App] {len(source_results)} valid source(s) from {len(_raw_sources)} fetched ({_skipped} failed/empty filtered).")
-                    elif _raw_sources:
-                        # All sources were filtered — log raw contexts for diagnosis
-                        print(f"   [App] ALL {len(_raw_sources)} source(s) filtered. Raw contexts:")
-                        for _rs in _raw_sources:
-                            print(f"      → {(_rs.get('context',''))[:120]!r}")
-                        st.warning(
-                            f"⚠️ **Web research ran but returned no usable content.** "
-                            f"{len(_raw_sources)} fetch attempt(s) all failed or returned empty pages. "
-                            f"Check the Streamlit Cloud logs for the exact failure reason. "
-                            f"The pipeline will continue using only your rules.",
-                            icon="🌐"
-                        )
-                    results["sources"] = source_results
-                except Exception as e:
-                    st.warning(f"M4 research failed (non-fatal): {e}")
-            elif not _any_research if "_any_research" in dir() else True:
-                _skip_reason = "document mode" if _doc_present else "all sources disabled"
-                status.info(f"📄 Skipping web research ({_skip_reason}) — rules from user + document only.")
-
-            if "rules" in futures:
-                try:
-                    parsed_user_rules = futures["rules"].result()
-                except Exception as e:
-                    st.error(f"Rule parsing failed: {e}"); st.stop()
-            else:
-                parsed_user_rules = []
-
-        status.empty()
-
-        # ── Research → Rule derivation ─────────────────────────────────────────
-        research_rules = []
-        if source_results and mode == "🔬 Full":
-            prog.progress(22, text="🔬 Deriving rules from research…")
-            status.info("Deriving constraints from research sources…")
-            for src in source_results:
-                src_ctx   = src.get("context", "")
-                src_name  = src.get("source_name", "Research")
-                src_ref   = src.get("reference", "")
-                src_title = src.get("title", "the topic")
-                derivation_prompt = (
-                    f"Based on this {src_name} excerpt about '{src_title}':\n\n"
-                    f"'{src_ctx}'\n\n"
-                    f"The user is working on: '{user_prompt}'\n\n"
-                    f"Derive ONLY constraints a domain expert would require for THIS task.\n"
-                    f"Each rule must: be directly relevant, be numerical or boolean, have a "
-                    f"CONCRETE threshold (no undefined variables like 'fast_threshold').\n"
-                    f"Return a JSON array of rule strings ONLY. Return [] if no rules pass.\n"
-                    f"Example good rule: 'yield strength safety factor must be greater than 3.0'\n"
-                    f"Example bad rule: 'design must be good' (unverifiable)"
-                )
-                try:
-                    raw_rt = m2._call_llm(derivation_prompt, llm_config, max_tokens=512).strip().replace("```json","").replace("```","").strip()
-                    rule_texts = json.loads(raw_rt)
-                    if isinstance(rule_texts, list):
-                        for rt in rule_texts:
-                            parsed = m2.parse_rule_to_constraint(rt, api_key)
-                            parsed["source_name"] = src_name
-                            parsed["source"]      = src_ref
-                            research_rules.append(parsed)
-                            print(f"   [Research rule] {rt[:70]}")
-                except Exception as e:
-                    print(f"   [Research derivation failed] {e}")
-            status.empty()
-
-        # Merge user rules + research rules, attach source labels, deduplicate
-        for r in parsed_user_rules:
-            if r and "source_name" not in r:
-                r["source_name"] = "User"
-        all_rules = [r for r in parsed_user_rules if r] + research_rules
-        structured_rules = _dedup_rules(all_rules)
-        results["structured_rules"] = structured_rules
-
-        # ── Contradiction check + auto-resolution ────────────────────────
-        _contradictions = _detect_contradictions(structured_rules)
-        results["contradictions"] = _contradictions
-
-        if _contradictions:
-            status.warning(
-                f"⚠️ {len(_contradictions)} contradiction(s) detected — auto-resolving…"
-            )
-            _resolved_log = []
-            _rules_to_remove = set()
-
-            for _ctr in _contradictions:
-                _ra = _ctr["rule_a"]
-                _rb = _ctr["rule_b"]
-                _reason = _ctr["reason"]
-
-                # Strategy: keep the rule from the user (source_name == "User")
-                # and remove the research-derived conflicting rule.
-                # If both are user rules, keep the more permissive one
-                # (upper bound preferred over lower when they conflict)
-                # and log the resolution.
-                _ra_user = _ra.get("source_name","") == "User"
-                _rb_user = _rb.get("source_name","") == "User"
-
-                if _ra_user and not _rb_user:
-                    # Remove the research rule
-                    _remove_idx = id(_rb)
-                    _keep = _ra
-                    _drop = _rb
-                elif _rb_user and not _ra_user:
-                    _remove_idx = id(_ra)
-                    _keep = _rb
-                    _drop = _ra
-                else:
-                    # Both user rules or both research — remove the stricter one
-                    # (the one with the smaller allowed range / higher lower-bound)
-                    _oa = _ra.get("operator","")
-                    _ob = _rb.get("operator","")
-                    if _oa in ("<","<="):
-                        # ra is upper bound — keep it (it allows more)
-                        _remove_idx = id(_rb)
-                        _keep = _ra; _drop = _rb
-                    else:
-                        _remove_idx = id(_ra)
-                        _keep = _rb; _drop = _ra
-
-                _rules_to_remove.add(id(_drop))
-                _resolved_log.append(
-                    f"Removed '{_drop.get('display',_drop.get('original','?'))}' "
-                    f"(conflicts with '{_keep.get('display',_keep.get('original','?'))}') "
-                    f"— {_reason}"
-                )
-
-            # Apply removals
-            _before = len(structured_rules)
-            structured_rules = [r for r in structured_rules
-                                 if id(r) not in _rules_to_remove]
-            results["structured_rules"] = structured_rules
-            results["contradictions_resolved"] = _resolved_log
-
-            _removed_n = _before - len(structured_rules)
-            status.info(
-                f"✅ Auto-resolved {_removed_n} contradicting rule(s). "
-                f"Removed: " + "; ".join(_resolved_log)
-            )
-
-        # ── M3: Store in Qdrant ───────────────────────────────────────────────
-        brain_records = {"rules": [], "sources": [], "audit": []}
-        if has_m3 and qdrant_client:
-            prog.progress(32, text="🧠 Storing in Qdrant…")
-            status.info("Storing symbolic references…")
-            try:
-                if source_results:
-                    for src in source_results:
-                        m3.store_source(qdrant_client, src, run_id=run_id)
-                    brain_records["sources"] = m3.get_all_records(
-                        qdrant_client, "sources", run_id=run_id)
-                if structured_rules:
-                    m3.store_all_rules(qdrant_client, structured_rules, run_id=run_id)
-                    brain_records["rules"] = m3.get_all_records(
-                        qdrant_client, "rules", run_id=run_id)
-                query          = user_prompt or existing_draft
-                # IMPORTANT: pass run_id so retrieve_context only pulls
-                # context from THIS run — prevents cross-query contamination
-                memory_context = m3.retrieve_context(
-                    qdrant_client, query, n_results=4, run_id=run_id)
-                results["memory_context"] = memory_context
-            except Exception as e:
+            # Warn if user has research sources checked but mode blocks research
+            if _any_research and not do_research and mode == "📐 Audit Only":
                 st.warning(
-                    f"⚠️ Qdrant step failed (non-fatal): {e}\n\n"
-                    f"Second Brain will be empty for this run. "
-                    f"The pipeline will continue normally."
+                    "⚠️ **Research sources are checked but mode is 'Audit Only'** — "
+                    "web research is skipped in Audit Only mode. "
+                    "Switch to **🔬 Full** or **🌐 Research+Gen** to use web research.",
+                    icon="🔍"
                 )
+
+            prog.progress(8, text="⚡ Research & rule parsing in parallel…")
+
+            def _run_research():
+                if not user_prompt.strip():
+                    return []
+                return m4.research_all_sources(
+                    user_prompt.strip(), api_key=api_key,
+                    llm_config=llm_config, research_config=_research_config,
+                )
+
+            def _run_rule_parse():
+                return m2.parse_rules_parallel(rules_snapshot, api_key, llm_config=llm_config)
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = {}
+                if do_research: futures["research"] = pool.submit(_run_research)
+                if do_rules:    futures["rules"]    = pool.submit(_run_rule_parse)
+
+                msgs = []
+                if "research" in futures:
+                    _rc = _research_config if "_research_config" in dir() else {}
+                    _srcs = [k for k,v in [
+                        ("Wikipedia",  _rc.get("wikipedia")),
+                        ("DuckDuckGo", _rc.get("duckduckgo")),
+                        ("Google",     _rc.get("google")),
+                        ("Web Search", _rc.get("web_search")),
+                    ] if v] + ([f"{len(_rc.get('custom_urls',[]))} URL(s)"] if _rc.get("custom_urls") else [])
+                    msgs.append("M4 researching: " + (", ".join(_srcs) if _srcs else "sources"))
+                if "rules"    in futures: msgs.append(f"M2 parsing {len(rules_snapshot)} rule(s)")
+                if msgs: status.info(" · ".join(msgs) + "…")
+
+                if "research" in futures:
+                    try:
+                        _raw_sources   = futures["research"].result()
+                        # Filter out failed/empty fetch results — only keep genuine sources
+                        source_results = [s for s in _raw_sources
+                                          if m4._is_valid_source(s)]
+                        _skipped = len(_raw_sources) - len(source_results)
+                        if source_results:
+                            print(f"   [App] {len(source_results)} valid source(s) from {len(_raw_sources)} fetched ({_skipped} failed/empty filtered).")
+                        elif _raw_sources:
+                            # All sources were filtered — log raw contexts for diagnosis
+                            print(f"   [App] ALL {len(_raw_sources)} source(s) filtered. Raw contexts:")
+                            for _rs in _raw_sources:
+                                print(f"      → {(_rs.get('context',''))[:120]!r}")
+                            st.warning(
+                                f"⚠️ **Web research ran but returned no usable content.** "
+                                f"{len(_raw_sources)} fetch attempt(s) all failed or returned empty pages. "
+                                f"Check the Streamlit Cloud logs for the exact failure reason. "
+                                f"The pipeline will continue using only your rules.",
+                                icon="🌐"
+                            )
+                        results["sources"] = source_results
+                    except Exception as e:
+                        st.warning(f"M4 research failed (non-fatal): {e}")
+                elif not _any_research if "_any_research" in dir() else True:
+                    _skip_reason = "document mode" if _doc_present else "all sources disabled"
+                    status.info(f"📄 Skipping web research ({_skip_reason}) — rules from user + document only.")
+
+                if "rules" in futures:
+                    try:
+                        parsed_user_rules = futures["rules"].result()
+                    except Exception as e:
+                        st.error(f"Rule parsing failed: {e}"); st.stop()
+                else:
+                    parsed_user_rules = []
+
             status.empty()
 
-        # Show the user what rules are going to be enforced (with source badges)
-        if structured_rules:
-            prog.progress(38, text="📋 Rules ready…")
-            chips = '<div class="rules-container" style="margin-bottom:0.8rem;">'
-            for i, r in enumerate(structured_rules):
-                sn     = r.get("source_name", "User")
-                bg     = _src_badge(sn)
-                disp   = r.get("display", r.get("original",""))[:70]
-                disp_e = disp.replace("&","&amp;").replace("<","&lt;")
-                chips += f'<div class="rule-chip"><span class="rule-num">R{i+1}</span><span style="flex:1">{disp_e}</span>{bg}</div>'
-            chips += '</div>'
-            status.markdown(chips, unsafe_allow_html=True)
-
-        # ══════════════════════════════════════════════════════════════════════
-        # REWRITE LOOP  (the core system claim — restored)
-        # ══════════════════════════════════════════════════════════════════════
-        MAX_ITER         = int(max_attempts)
-        LTN_THRESHOLD    = float(ltn_threshold)
-        constraint_block = _build_constraint_injection(structured_rules) if structured_rules else ""
-
-        passed               = False
-        attempt              = 0
-        draft_text           = existing_draft.strip()
-        violation_feedback   = ""
-        iteration_history    = []   # list of {attempt, draft, audit, ltn_score, violations}
-        final_audit_results  = []
-        final_ltn_score      = 0.0
-        final_draft          = ""
-
-        # If user pasted existing draft → audit only, no generation
-        audit_only = bool(existing_draft.strip()) and not user_prompt.strip()
-
-        while (attempt < MAX_ITER) and not passed:
-            attempt += 1
-            iter_label = f"Iteration {attempt}/{MAX_ITER}"
-            prog.progress(min(99, 45 + attempt * 8), text=f"✍️ {iter_label} -- generating...")
-
-            # ── Generate draft (skip if audit-only) ───────────────────────────
-            if not audit_only:
-                # Build numbered source reference list so the LLM can cite by
-                # [Source N] in its draft.  Include title + URL for each source.
-                ctx_parts = []
-                _src_ref_lines = []   # Used in citation instruction below
-                for _si, s in enumerate(source_results):
-                    _sn    = s.get("source_name", "Source")
-                    _title = s.get("title", "")
-                    _url   = (s.get("reference","") or s.get("source","") or "").strip()
-                    _ctx   = s.get("context","")
-                    _label = f"[Source {_si+1}]"
-                    _hdr   = f"{_label} {_sn}"
-                    if _title: _hdr += f" — {_title}"
-                    if _url and _url not in ("None","none",""):
-                        _hdr += f"\nURL: {_url}"
-                    ctx_parts.append(f"{_hdr}\n{_ctx}")
-                    # Build citation reference line for the instruction
-                    _ref_str = f"  {_label} {_sn}"
-                    if _title: _ref_str += f" — {_title}"
-                    if _url and _url not in ("None","none",""):
-                        _ref_str += f" ({_url})"
-                    _src_ref_lines.append(_ref_str)
-
-                if memory_context:
-                    ctx_parts.append("Relevant constraints:\n" + "\n".join(memory_context))
-
-                # Build document block — injected into prompt when user uploaded/pasted a doc
-                _doc_text = existing_draft.strip()
-                if _doc_text:
-                    _doc_char_limit = 40000
-                    _truncated      = len(_doc_text) > _doc_char_limit
-                    _doc_preview    = _doc_text[:_doc_char_limit]
-
-                    # Warn user if document was truncated
-                    if _truncated:
-                        st.warning(
-                            f"⚠️ **Document truncated:** Your document is "
-                            f"{len(_doc_text):,} characters but the LLM context "
-                            f"limit is {_doc_char_limit:,} chars. Only the first "
-                            f"{_doc_char_limit:,} characters were sent. "
-                            f"Consider splitting the document or reducing other content."
-                        )
-
-                    # Warn if document looks like a failed PDF extraction (blank/near-blank)
-                    _non_blank_chars = len(_doc_text.replace(" ","").replace("\n",""))
-                    if _non_blank_chars < 100:
-                        st.warning(
-                            "⚠️ **Document appears empty or unreadable.** "
-                            "If you uploaded a scanned PDF, the pages are images — "
-                            "text extraction returns nothing. Try copy-pasting the "
-                            "text directly into the Reference Document field instead."
-                        )
-
-                    # Detect whether this is a Q&A scenario (prompt asks something
-                    # about the document) vs a generation scenario (document is
-                    # background material for a new piece of content).
-                    _qa_keywords = (
-                        "summarize", "summary", "explain", "what does", "what is",
-                        "analyze", "analyse", "review", "describe", "tell me",
-                        "answer", "extract", "find", "list", "identify",
-                        "according to", "based on", "from the document", "from this",
-                        "in the document", "the document says", "does it",
+            # ── Research → Rule derivation ─────────────────────────────────────────
+            research_rules = []
+            if source_results and mode == "🔬 Full":
+                prog.progress(22, text="🔬 Deriving rules from research…")
+                status.info("Deriving constraints from research sources…")
+                for src in source_results:
+                    src_ctx   = src.get("context", "")
+                    src_name  = src.get("source_name", "Research")
+                    src_ref   = src.get("reference", "")
+                    src_title = src.get("title", "the topic")
+                    derivation_prompt = (
+                        f"Based on this {src_name} excerpt about '{src_title}':\n\n"
+                        f"'{src_ctx}'\n\n"
+                        f"The user is working on: '{user_prompt}'\n\n"
+                        f"Derive ONLY constraints a domain expert would require for THIS task.\n"
+                        f"Each rule must: be directly relevant, be numerical or boolean, have a "
+                        f"CONCRETE threshold (no undefined variables like 'fast_threshold').\n"
+                        f"Return a JSON array of rule strings ONLY. Return [] if no rules pass.\n"
+                        f"Example good rule: 'yield strength safety factor must be greater than 3.0'\n"
+                        f"Example bad rule: 'design must be good' (unverifiable)"
                     )
-                    _prompt_lower = user_prompt.lower()
-                    _is_qa_mode   = any(kw in _prompt_lower for kw in _qa_keywords)
+                    try:
+                        raw_rt = m2._call_llm(derivation_prompt, llm_config, max_tokens=512).strip().replace("```json","").replace("```","").strip()
+                        rule_texts = json.loads(raw_rt)
+                        if isinstance(rule_texts, list):
+                            for rt in rule_texts:
+                                parsed = m2.parse_rule_to_constraint(rt, api_key)
+                                parsed["source_name"] = src_name
+                                parsed["source"]      = src_ref
+                                research_rules.append(parsed)
+                                print(f"   [Research rule] {rt[:70]}")
+                    except Exception as e:
+                        print(f"   [Research derivation failed] {e}")
+                status.empty()
 
-                    if _is_qa_mode:
-                        _doc_block = (
-                            f"\n\nDOCUMENT TO ANALYSE (the user's question is about this):\n"
-                            f"The following is the full text of a document provided by the user.\n"
-                            f"Your response MUST be grounded in this document's content.\n"
-                            f"Quote or cite specific parts when relevant.\n"
-                            f"If the document does not contain information needed to answer "
-                            f"the question, say so explicitly rather than guessing.\n"
-                            f"{'[NOTE: Document was truncated to first 40,000 chars]' if _truncated else ''}\n"
-                            f"---\n{_doc_preview}\n---\n"
-                        )
-                    else:
-                        _doc_block = (
-                            f"\n\nREFERENCE DOCUMENT (treat as source material):\n"
-                            f"The following is the full text of a document provided by the user.\n"
-                            f"You MUST use its content directly where the rules require it.\n"
-                            f"Do NOT paraphrase, fabricate, or substitute this content.\n"
-                            f"Cite or reference specific sections where relevant.\n"
-                            f"{'[NOTE: Document was truncated to first 40,000 chars]' if _truncated else ''}\n"
-                            f"---\n{_doc_preview}\n---\n"
-                        )
-                else:
-                    _doc_block = ""
+            # Merge user rules + research rules, attach source labels, deduplicate
+            for r in parsed_user_rules:
+                if r and "source_name" not in r:
+                    r["source_name"] = "User"
+            all_rules = [r for r in parsed_user_rules if r] + research_rules
+            structured_rules = _dedup_rules(all_rules)
+            results["structured_rules"] = structured_rules
 
-                # Build citation instruction if we have sources with URLs
-                _citation_block = ""
-                if _src_ref_lines:
-                    _n_sources = len(_src_ref_lines)
-                    if _n_sources == 1:
-                        # Single source: cite once per section/paragraph, not every sentence
-                        _cite_style = (
-                            "CITATION STYLE — SINGLE SOURCE: Since there is only one source, "
-                            "do NOT cite it after every sentence. Cite it once at the end of "
-                            "each major section or paragraph where you draw from it. "
-                            "Write naturally as an author — the source underpins the whole piece."
-                        )
+            # ── Contradiction check + auto-resolution ────────────────────────
+            _contradictions = _detect_contradictions(structured_rules)
+            results["contradictions"] = _contradictions
+
+            if _contradictions:
+                status.warning(
+                    f"⚠️ {len(_contradictions)} contradiction(s) detected — auto-resolving…"
+                )
+                _resolved_log = []
+                _rules_to_remove = set()
+
+                for _ctr in _contradictions:
+                    _ra = _ctr["rule_a"]
+                    _rb = _ctr["rule_b"]
+                    _reason = _ctr["reason"]
+
+                    # Strategy: keep the rule from the user (source_name == "User")
+                    # and remove the research-derived conflicting rule.
+                    # If both are user rules, keep the more permissive one
+                    # (upper bound preferred over lower when they conflict)
+                    # and log the resolution.
+                    _ra_user = _ra.get("source_name","") == "User"
+                    _rb_user = _rb.get("source_name","") == "User"
+
+                    if _ra_user and not _rb_user:
+                        # Remove the research rule
+                        _remove_idx = id(_rb)
+                        _keep = _ra
+                        _drop = _rb
+                    elif _rb_user and not _ra_user:
+                        _remove_idx = id(_ra)
+                        _keep = _rb
+                        _drop = _ra
                     else:
-                        # Multiple sources: cite by number where content comes from a specific source
-                        _cite_style = (
-                            "CITATION STYLE — MULTIPLE SOURCES: Use [Source N] at the end of "
-                            "sentences or paragraphs where the specific information comes from "
-                            "that source. Cite naturally — not after every sentence."
-                        )
-                    _citation_block = (
-                        f"\n\nSOURCE CITATION REQUIREMENTS:\n"
-                        f"The following sources were retrieved for this query. "
-                        f"At the end of your response, include a 'References' section "
-                        f"listing each source you cited with its full URL.\n"
-                        f"{_cite_style}\n"
-                        f"Sources available:\n"
-                        + "\n".join(_src_ref_lines)
-                        + "\n"
+                        # Both user rules or both research — remove the stricter one
+                        # (the one with the smaller allowed range / higher lower-bound)
+                        _oa = _ra.get("operator","")
+                        _ob = _rb.get("operator","")
+                        if _oa in ("<","<="):
+                            # ra is upper bound — keep it (it allows more)
+                            _remove_idx = id(_rb)
+                            _keep = _ra; _drop = _rb
+                        else:
+                            _remove_idx = id(_ra)
+                            _keep = _rb; _drop = _ra
+
+                    _rules_to_remove.add(id(_drop))
+                    _resolved_log.append(
+                        f"Removed '{_drop.get('display',_drop.get('original','?'))}' "
+                        f"(conflicts with '{_keep.get('display',_keep.get('original','?'))}') "
+                        f"— {_reason}"
                     )
 
-                gen_prompt = (
-                    f"You are generating content for a user request. "
-                    f"You MUST satisfy every constraint below.\n\n"
-                    f"USER REQUEST:\n{user_prompt}\n\n"
-                    f"{constraint_block}\n"
-                    f"{_citation_block}"
-                    f"{violation_feedback}"
-                    f"{_doc_block}\n\n"
-                    f"ADDITIONAL CONTEXT FROM RESEARCH:\n"
-                    + ("\n".join(ctx_parts) if ctx_parts else "None")
-                    + "\n\nGenerate a detailed, helpful response that explicitly states "
-                      "all relevant values as numbers and uses the exact variable labels "
-                      "specified in the constraints above.\n\n"
-                      "WRITING STYLE — CRITICAL:\n"
-                      "Write in natural, fluent prose as a knowledgeable author would. "
-                      "Satisfy every constraint through the substance of your content — "
-                      "do NOT satisfy constraints by verbatim-stating counts or thresholds "
-                      "inside the prose (e.g. do NOT write '1 neural method', '3 benefits', "
-                      "'at least 2 researchers' — just write about those things naturally). "
-                      "The auditor extracts values from your text; you do not need to "
-                      "label them explicitly for the reader.\n\n"
-                      "FORMATTING RULES — READ CAREFULLY:\n"
-                      "1. Do NOT start your response with a block of constraint flag lines "
-                      "(lines like `variable_name: true` or `variable_name: false`). "
-                      "ALL such verification label lines must go at the very END of your "
-                      "response, after all prose and explanatory content, under the exact "
-                      "section header: 'CONSTRAINT VERIFICATION LABELS'.\n"
-                      "2. Every numbered list item you start (1. 2. 3. ...) MUST be "
-                      "completed with full content. Never leave a trailing number with "
-                      "no text after it.\n"
-                      "3. Write in natural prose — constraint labels exist for machine "
-                      "verification only and must never interrupt or dominate your content."
+                # Apply removals
+                _before = len(structured_rules)
+                structured_rules = [r for r in structured_rules
+                                     if id(r) not in _rules_to_remove]
+                results["structured_rules"] = structured_rules
+                results["contradictions_resolved"] = _resolved_log
+
+                _removed_n = _before - len(structured_rules)
+                status.info(
+                    f"✅ Auto-resolved {_removed_n} contradicting rule(s). "
+                    f"Removed: " + "; ".join(_resolved_log)
                 )
 
+            # ── M3: Store in Qdrant ───────────────────────────────────────────────
+            brain_records = {"rules": [], "sources": [], "audit": []}
+            if has_m3 and qdrant_client:
+                prog.progress(32, text="🧠 Storing in Qdrant…")
+                status.info("Storing symbolic references…")
                 try:
-                    _model_display = llm_config.get("model", "model")
-                    _doc_note = f" (+ {len(_doc_text):,} char document)" if _doc_text else ""
-                    status.info(f"⚡ {iter_label} — generating with {_model_display}{_doc_note}…")
-                    stream_box = st.empty()
-                    collected  = []
-
-                    if llm_config.get("provider") == "anthropic":
-                        import anthropic as _ant
-                        import hashlib as _hl
-                        _ant_ck = _hl.md5(("anthropic" + llm_config["model"] + api_key).encode()).hexdigest()
-                        if _ant_ck not in m2._CLIENT_CACHE:
-                            m2._CLIENT_CACHE[_ant_ck] = _ant.Anthropic(api_key=api_key)
-                        _anth_client = m2._CLIENT_CACHE[_ant_ck]
-                        with _anth_client.messages.stream(
-                            model=llm_config["model"], max_tokens=16000,
-                            messages=[{"role":"user","content":gen_prompt}]
-                        ) as stream:
-                            for text_chunk in stream.text_stream:
-                                collected.append(text_chunk)
-                                live = "".join(collected)
-                                safe = live.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-                                stream_box.markdown(
-                                    f'<div class="gen-output" style="max-height:200px">{safe}</div>',
-                                    unsafe_allow_html=True)
-
-                    elif llm_config.get("provider") == "openai":
-                        import openai as _oai
-                        _oai_client = _oai.OpenAI(api_key=api_key)
-                        _oai_model  = llm_config["model"]
-                        # o-series and gpt-5.x use max_completion_tokens, not max_tokens
-                        _uses_completion_tokens = (
-                            _oai_model in {"o3","o3-pro","o3-mini","o4-mini","o1","o1-mini","o1-pro"}
-                            or _oai_model.startswith("gpt-5")
-                        )
-                        _oai_kwargs = {
-                            "model"   : _oai_model,
-                            "stream"  : True,
-                            "messages": [{"role":"user","content":gen_prompt}],
-                        }
-                        if _uses_completion_tokens:
-                            _oai_kwargs["max_completion_tokens"] = 16000
-                        else:
-                            _oai_kwargs["max_tokens"] = 16000
-                        stream = _oai_client.chat.completions.create(**_oai_kwargs)
-                        for chunk in stream:
-                            delta = chunk.choices[0].delta.content
-                            if delta:
-                                collected.append(delta)
-                                live = "".join(collected)
-                                safe = live.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-                                stream_box.markdown(
-                                    f'<div class="gen-output" style="max-height:200px">{safe}</div>',
-                                    unsafe_allow_html=True)
-
-                    else:  # Google Gemini — no streaming SDK, single call
-                        stream_box.info(f"Generating with {llm_config.get('model','Gemini')}...")
-                        result = m2._call_llm(gen_prompt, llm_config, max_tokens=16000)
-                        collected = [result]
-                        safe = result.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-                        stream_box.markdown(
-                            f'<div class="gen-output" style="max-height:200px">{safe}</div>',
-                            unsafe_allow_html=True)
-
-                    draft_text = "".join(collected)
-                    stream_box.empty()
-                    status.empty()
-                    if not draft_text.strip():
-                        st.error(f"{llm_config.get('model','LLM')} returned an empty response. Check your API key and model access."); st.stop()
+                    if source_results:
+                        for src in source_results:
+                            m3.store_source(qdrant_client, src, run_id=run_id)
+                        brain_records["sources"] = m3.get_all_records(
+                            qdrant_client, "sources", run_id=run_id)
+                    if structured_rules:
+                        m3.store_all_rules(qdrant_client, structured_rules, run_id=run_id)
+                        brain_records["rules"] = m3.get_all_records(
+                            qdrant_client, "rules", run_id=run_id)
+                    query          = user_prompt or existing_draft
+                    # IMPORTANT: pass run_id so retrieve_context only pulls
+                    # context from THIS run — prevents cross-query contamination
+                    memory_context = m3.retrieve_context(
+                        qdrant_client, query, n_results=4, run_id=run_id)
+                    results["memory_context"] = memory_context
                 except Exception as e:
-                    st.error(f"Draft generation failed: {e}"); st.stop()
-
-            # ── Audit ─────────────────────────────────────────────────────────
-            if structured_rules and draft_text:
-                prog.progress(min(99, 55 + attempt * 6), text=f"🔍 {iter_label} -- auditing...")
-                status.info(f"M2 auditing {len(structured_rules)} rule(s)…")
-                try:
-                    audit_results = m2.structured_audit(draft_text, structured_rules, api_key, llm_config=llm_config)
-                except Exception as e:
-                    st.error(f"Audit failed: {e}"); st.stop()
+                    st.warning(
+                        f"⚠️ Qdrant step failed (non-fatal): {e}\n\n"
+                        f"Second Brain will be empty for this run. "
+                        f"The pipeline will continue normally."
+                    )
                 status.empty()
-            else:
-                audit_results = []
 
-            # ── LTN ───────────────────────────────────────────────────────────
-            ltn_score  = 0.0
-            violations = []
-            if has_ltn and audit_results:
-                try:
-                    ltn_score, violations = m1.verify_and_report(audit_results)
-                except Exception as e:
-                    st.warning(f"LTN scoring failed: {e}")
+            # Show the user what rules are going to be enforced (with source badges)
+            if structured_rules:
+                prog.progress(38, text="📋 Rules ready…")
+                chips = '<div class="rules-container" style="margin-bottom:0.8rem;">'
+                for i, r in enumerate(structured_rules):
+                    sn     = r.get("source_name", "User")
+                    bg     = _src_badge(sn)
+                    disp   = r.get("display", r.get("original",""))[:70]
+                    disp_e = disp.replace("&","&amp;").replace("<","&lt;")
+                    chips += f'<div class="rule-chip"><span class="rule-num">R{i+1}</span><span style="flex:1">{disp_e}</span>{bg}</div>'
+                chips += '</div>'
+                status.markdown(chips, unsafe_allow_html=True)
 
-            # Store Qdrant audit records
-            if has_m3 and qdrant_client and audit_results:
-                try:
-                    for ar in audit_results:
-                        m3.store_audit_result(qdrant_client, ar, run_id=run_id)
-                    brain_records["audit"] = m3.get_all_records(
-                        qdrant_client, "audit", run_id=run_id)
-                except Exception:
-                    pass
+            # ══════════════════════════════════════════════════════════════════════
+            # REWRITE LOOP  (the core system claim — restored)
+            # ══════════════════════════════════════════════════════════════════════
+            MAX_ITER         = int(max_attempts)
+            LTN_THRESHOLD    = float(ltn_threshold)
+            constraint_block = _build_constraint_injection(structured_rules) if structured_rules else ""
 
-            # Save this iteration
-            iter_record = {
-                "attempt"   : attempt,
-                "draft"     : draft_text,
-                "audit"     : audit_results,
-                "ltn_score" : ltn_score,
-                "violations": violations,
-            }
-            if len(iteration_history) > 0:
-                iter_record["diff"] = _diff_sentences(
-                    iteration_history[-1]["draft"], draft_text)
-            iteration_history.append(iter_record)
+            passed               = False
+            attempt              = 0
+            draft_text           = existing_draft.strip()
+            violation_feedback   = ""
+            iteration_history    = []   # list of {attempt, draft, audit, ltn_score, violations}
+            final_audit_results  = []
+            final_ltn_score      = 0.0
+            final_draft          = ""
 
-            # Always keep the latest for halt message
-            final_audit_results = audit_results
-            final_ltn_score     = ltn_score
-            final_draft         = draft_text
+            # If user pasted existing draft → audit only, no generation
+            audit_only = bool(existing_draft.strip()) and not user_prompt.strip()
 
-            passed_count = sum(1 for r in audit_results if r.get("satisfies"))
-            total_count  = len(audit_results)
-            status.info(f"{'✅' if ltn_score >= LTN_THRESHOLD else '⚠️'} {iter_label} "
-                        f"— LTN: {ltn_score:.4f} | {passed_count}/{total_count} rules passed")
+            while (attempt < MAX_ITER) and not passed:
+                attempt += 1
+                iter_label = f"Iteration {attempt}/{MAX_ITER}"
+                prog.progress(min(99, 45 + attempt * 8), text=f"✍️ {iter_label} -- generating...")
 
-            if (not audit_results) or ltn_score >= LTN_THRESHOLD:
-                passed = True
-                break
+                # ── Generate draft (skip if audit-only) ───────────────────────────
+                if not audit_only:
+                    # Build numbered source reference list so the LLM can cite by
+                    # [Source N] in its draft.  Include title + URL for each source.
+                    ctx_parts = []
+                    _src_ref_lines = []   # Used in citation instruction below
+                    for _si, s in enumerate(source_results):
+                        _sn    = s.get("source_name", "Source")
+                        _title = s.get("title", "")
+                        _url   = (s.get("reference","") or s.get("source","") or "").strip()
+                        _ctx   = s.get("context","")
+                        _label = f"[Source {_si+1}]"
+                        _hdr   = f"{_label} {_sn}"
+                        if _title: _hdr += f" — {_title}"
+                        if _url and _url not in ("None","none",""):
+                            _hdr += f"\nURL: {_url}"
+                        ctx_parts.append(f"{_hdr}\n{_ctx}")
+                        # Build citation reference line for the instruction
+                        _ref_str = f"  {_label} {_sn}"
+                        if _title: _ref_str += f" — {_title}"
+                        if _url and _url not in ("None","none",""):
+                            _ref_str += f" ({_url})"
+                        _src_ref_lines.append(_ref_str)
 
-            # Build violation feedback for the next iteration
-            if attempt < MAX_ITER:
-                violation_feedback = _build_violation_feedback(violations)
-                time.sleep(0.5)
+                    if memory_context:
+                        ctx_parts.append("Relevant constraints:\n" + "\n".join(memory_context))
 
-        # Done
-        prog.progress(100, text="✅ Done!")
-        time.sleep(0.3)
-        prog.empty()
-        status.empty()
+                    # Build document block — injected into prompt when user uploaded/pasted a doc
+                    _doc_text = existing_draft.strip()
+                    if _doc_text:
+                        _doc_char_limit = 40000
+                        _truncated      = len(_doc_text) > _doc_char_limit
+                        _doc_preview    = _doc_text[:_doc_char_limit]
 
-        results.update({
-            "draft"            : final_draft,
-            "audit"            : final_audit_results,
-            "ltn_score"        : final_ltn_score,
-            "violations"       : [r for r in final_audit_results if not r.get("satisfies")],
-            "passed"           : passed,
-            "iterations_used"  : attempt,
-            "max_iterations"   : MAX_ITER,
-            "ltn_threshold"    : LTN_THRESHOLD,
-            "brain_records"    : brain_records,
-            "run_id"           : run_id,
-            "iteration_history": iteration_history,
-            "user_prompt"      : user_prompt.strip(),
-            "llm_provider"     : _prov["id"],
-            "llm_model"        : _model_choice,
-            "llm_provider_name": _provider_name,
-        })
-        st.session_state.results           = results
-        st.session_state.brain_records      = brain_records
-        st.session_state['_pipeline_running'] = False
-        st.rerun()
+                        # Warn user if document was truncated
+                        if _truncated:
+                            st.warning(
+                                f"⚠️ **Document truncated:** Your document is "
+                                f"{len(_doc_text):,} characters but the LLM context "
+                                f"limit is {_doc_char_limit:,} chars. Only the first "
+                                f"{_doc_char_limit:,} characters were sent. "
+                                f"Consider splitting the document or reducing other content."
+                            )
+
+                        # Warn if document looks like a failed PDF extraction (blank/near-blank)
+                        _non_blank_chars = len(_doc_text.replace(" ","").replace("\n",""))
+                        if _non_blank_chars < 100:
+                            st.warning(
+                                "⚠️ **Document appears empty or unreadable.** "
+                                "If you uploaded a scanned PDF, the pages are images — "
+                                "text extraction returns nothing. Try copy-pasting the "
+                                "text directly into the Reference Document field instead."
+                            )
+
+                        # Detect whether this is a Q&A scenario (prompt asks something
+                        # about the document) vs a generation scenario (document is
+                        # background material for a new piece of content).
+                        _qa_keywords = (
+                            "summarize", "summary", "explain", "what does", "what is",
+                            "analyze", "analyse", "review", "describe", "tell me",
+                            "answer", "extract", "find", "list", "identify",
+                            "according to", "based on", "from the document", "from this",
+                            "in the document", "the document says", "does it",
+                        )
+                        _prompt_lower = user_prompt.lower()
+                        _is_qa_mode   = any(kw in _prompt_lower for kw in _qa_keywords)
+
+                        if _is_qa_mode:
+                            _doc_block = (
+                                f"\n\nDOCUMENT TO ANALYSE (the user's question is about this):\n"
+                                f"The following is the full text of a document provided by the user.\n"
+                                f"Your response MUST be grounded in this document's content.\n"
+                                f"Quote or cite specific parts when relevant.\n"
+                                f"If the document does not contain information needed to answer "
+                                f"the question, say so explicitly rather than guessing.\n"
+                                f"{'[NOTE: Document was truncated to first 40,000 chars]' if _truncated else ''}\n"
+                                f"---\n{_doc_preview}\n---\n"
+                            )
+                        else:
+                            _doc_block = (
+                                f"\n\nREFERENCE DOCUMENT (treat as source material):\n"
+                                f"The following is the full text of a document provided by the user.\n"
+                                f"You MUST use its content directly where the rules require it.\n"
+                                f"Do NOT paraphrase, fabricate, or substitute this content.\n"
+                                f"Cite or reference specific sections where relevant.\n"
+                                f"{'[NOTE: Document was truncated to first 40,000 chars]' if _truncated else ''}\n"
+                                f"---\n{_doc_preview}\n---\n"
+                            )
+                    else:
+                        _doc_block = ""
+
+                    # Build citation instruction if we have sources with URLs
+                    _citation_block = ""
+                    if _src_ref_lines:
+                        _n_sources = len(_src_ref_lines)
+                        if _n_sources == 1:
+                            # Single source: cite once per section/paragraph, not every sentence
+                            _cite_style = (
+                                "CITATION STYLE — SINGLE SOURCE: Since there is only one source, "
+                                "do NOT cite it after every sentence. Cite it once at the end of "
+                                "each major section or paragraph where you draw from it. "
+                                "Write naturally as an author — the source underpins the whole piece."
+                            )
+                        else:
+                            # Multiple sources: cite by number where content comes from a specific source
+                            _cite_style = (
+                                "CITATION STYLE — MULTIPLE SOURCES: Use [Source N] at the end of "
+                                "sentences or paragraphs where the specific information comes from "
+                                "that source. Cite naturally — not after every sentence."
+                            )
+                        _citation_block = (
+                            f"\n\nSOURCE CITATION REQUIREMENTS:\n"
+                            f"The following sources were retrieved for this query. "
+                            f"At the end of your response, include a 'References' section "
+                            f"listing each source you cited with its full URL.\n"
+                            f"{_cite_style}\n"
+                            f"Sources available:\n"
+                            + "\n".join(_src_ref_lines)
+                            + "\n"
+                        )
+
+                    gen_prompt = (
+                        f"You are generating content for a user request. "
+                        f"You MUST satisfy every constraint below.\n\n"
+                        f"USER REQUEST:\n{user_prompt}\n\n"
+                        f"{constraint_block}\n"
+                        f"{_citation_block}"
+                        f"{violation_feedback}"
+                        f"{_doc_block}\n\n"
+                        f"ADDITIONAL CONTEXT FROM RESEARCH:\n"
+                        + ("\n".join(ctx_parts) if ctx_parts else "None")
+                        + "\n\nGenerate a detailed, helpful response that explicitly states "
+                          "all relevant values as numbers and uses the exact variable labels "
+                          "specified in the constraints above.\n\n"
+                          "WRITING STYLE — CRITICAL:\n"
+                          "Write in natural, fluent prose as a knowledgeable author would. "
+                          "Satisfy every constraint through the substance of your content — "
+                          "do NOT satisfy constraints by verbatim-stating counts or thresholds "
+                          "inside the prose (e.g. do NOT write '1 neural method', '3 benefits', "
+                          "'at least 2 researchers' — just write about those things naturally). "
+                          "The auditor extracts values from your text; you do not need to "
+                          "label them explicitly for the reader.\n\n"
+                          "FORMATTING RULES — READ CAREFULLY:\n"
+                          "1. Do NOT start your response with a block of constraint flag lines "
+                          "(lines like `variable_name: true` or `variable_name: false`). "
+                          "ALL such verification label lines must go at the very END of your "
+                          "response, after all prose and explanatory content, under the exact "
+                          "section header: 'CONSTRAINT VERIFICATION LABELS'.\n"
+                          "2. Every numbered list item you start (1. 2. 3. ...) MUST be "
+                          "completed with full content. Never leave a trailing number with "
+                          "no text after it.\n"
+                          "3. Write in natural prose — constraint labels exist for machine "
+                          "verification only and must never interrupt or dominate your content."
+                    )
+
+                    try:
+                        _model_display = llm_config.get("model", "model")
+                        _doc_note = f" (+ {len(_doc_text):,} char document)" if _doc_text else ""
+                        status.info(f"⚡ {iter_label} — generating with {_model_display}{_doc_note}…")
+                        stream_box = st.empty()
+                        collected  = []
+
+                        if llm_config.get("provider") == "anthropic":
+                            import anthropic as _ant
+                            import hashlib as _hl
+                            _ant_ck = _hl.md5(("anthropic" + llm_config["model"] + api_key).encode()).hexdigest()
+                            if _ant_ck not in m2._CLIENT_CACHE:
+                                m2._CLIENT_CACHE[_ant_ck] = _ant.Anthropic(api_key=api_key)
+                            _anth_client = m2._CLIENT_CACHE[_ant_ck]
+                            with _anth_client.messages.stream(
+                                model=llm_config["model"], max_tokens=16000,
+                                messages=[{"role":"user","content":gen_prompt}]
+                            ) as stream:
+                                for text_chunk in stream.text_stream:
+                                    collected.append(text_chunk)
+                                    live = "".join(collected)
+                                    safe = live.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+                                    stream_box.markdown(
+                                        f'<div class="gen-output" style="max-height:200px">{safe}</div>',
+                                        unsafe_allow_html=True)
+
+                        elif llm_config.get("provider") == "openai":
+                            import openai as _oai
+                            _oai_client = _oai.OpenAI(api_key=api_key)
+                            _oai_model  = llm_config["model"]
+                            # o-series and gpt-5.x use max_completion_tokens, not max_tokens
+                            _uses_completion_tokens = (
+                                _oai_model in {"o3","o3-pro","o3-mini","o4-mini","o1","o1-mini","o1-pro"}
+                                or _oai_model.startswith("gpt-5")
+                            )
+                            _oai_kwargs = {
+                                "model"   : _oai_model,
+                                "stream"  : True,
+                                "messages": [{"role":"user","content":gen_prompt}],
+                            }
+                            if _uses_completion_tokens:
+                                _oai_kwargs["max_completion_tokens"] = 16000
+                            else:
+                                _oai_kwargs["max_tokens"] = 16000
+                            stream = _oai_client.chat.completions.create(**_oai_kwargs)
+                            for chunk in stream:
+                                delta = chunk.choices[0].delta.content
+                                if delta:
+                                    collected.append(delta)
+                                    live = "".join(collected)
+                                    safe = live.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+                                    stream_box.markdown(
+                                        f'<div class="gen-output" style="max-height:200px">{safe}</div>',
+                                        unsafe_allow_html=True)
+
+                        else:  # Google Gemini — no streaming SDK, single call
+                            stream_box.info(f"Generating with {llm_config.get('model','Gemini')}...")
+                            result = m2._call_llm(gen_prompt, llm_config, max_tokens=16000)
+                            collected = [result]
+                            safe = result.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+                            stream_box.markdown(
+                                f'<div class="gen-output" style="max-height:200px">{safe}</div>',
+                                unsafe_allow_html=True)
+
+                        draft_text = "".join(collected)
+                        stream_box.empty()
+                        status.empty()
+                        if not draft_text.strip():
+                            st.error(f"{llm_config.get('model','LLM')} returned an empty response. Check your API key and model access."); st.stop()
+                    except Exception as e:
+                        st.error(f"Draft generation failed: {e}"); st.stop()
+
+                # ── Audit ─────────────────────────────────────────────────────────
+                if structured_rules and draft_text:
+                    prog.progress(min(99, 55 + attempt * 6), text=f"🔍 {iter_label} -- auditing...")
+                    status.info(f"M2 auditing {len(structured_rules)} rule(s)…")
+                    try:
+                        audit_results = m2.structured_audit(draft_text, structured_rules, api_key, llm_config=llm_config)
+                    except Exception as e:
+                        st.error(f"Audit failed: {e}"); st.stop()
+                    status.empty()
+                else:
+                    audit_results = []
+
+                # ── LTN ───────────────────────────────────────────────────────────
+                ltn_score  = 0.0
+                violations = []
+                if has_ltn and audit_results:
+                    try:
+                        ltn_score, violations = m1.verify_and_report(audit_results)
+                    except Exception as e:
+                        st.warning(f"LTN scoring failed: {e}")
+
+                # Store Qdrant audit records
+                if has_m3 and qdrant_client and audit_results:
+                    try:
+                        for ar in audit_results:
+                            m3.store_audit_result(qdrant_client, ar, run_id=run_id)
+                        brain_records["audit"] = m3.get_all_records(
+                            qdrant_client, "audit", run_id=run_id)
+                    except Exception:
+                        pass
+
+                # Save this iteration
+                iter_record = {
+                    "attempt"   : attempt,
+                    "draft"     : draft_text,
+                    "audit"     : audit_results,
+                    "ltn_score" : ltn_score,
+                    "violations": violations,
+                }
+                if len(iteration_history) > 0:
+                    iter_record["diff"] = _diff_sentences(
+                        iteration_history[-1]["draft"], draft_text)
+                iteration_history.append(iter_record)
+
+                # Always keep the latest for halt message
+                final_audit_results = audit_results
+                final_ltn_score     = ltn_score
+                final_draft         = draft_text
+
+                passed_count = sum(1 for r in audit_results if r.get("satisfies"))
+                total_count  = len(audit_results)
+                status.info(f"{'✅' if ltn_score >= LTN_THRESHOLD else '⚠️'} {iter_label} "
+                            f"— LTN: {ltn_score:.4f} | {passed_count}/{total_count} rules passed")
+
+                # Bug A fix: distinguish "no rules" (vacuous) from genuine pass.
+                # Empty audit_results means nothing was checked — the loop exits but
+                # we flag it as vacuous so the UI warns instead of showing a misleading
+                # "VERIFIED ✓" with LTN 0.0000.
+                _no_rules = (len(audit_results) == 0)
+                if _no_rules or ltn_score >= LTN_THRESHOLD:
+                    passed = True
+                    break
+
+                # Bug 3 fix: audit_only mode — draft is fixed, rewriting is pointless.
+                # Break after the first audit to avoid burning MAX_ITER × N_rules API
+                # tokens for zero benefit.
+                if audit_only:
+                    break
+
+                # Build violation feedback for the next iteration
+                if attempt < MAX_ITER:
+                    violation_feedback = _build_violation_feedback(violations)
+                    time.sleep(0.5)
+
+            # Done
+            prog.progress(100, text="✅ Done!")
+            time.sleep(0.3)
+            prog.empty()
+            status.empty()
+
+            results.update({
+                "draft"            : final_draft,
+                "audit"            : final_audit_results,
+                "ltn_score"        : final_ltn_score,
+                "violations"       : [r for r in final_audit_results if not r.get("satisfies")],
+                "passed"           : passed,
+                "no_rules"         : (len(final_audit_results) == 0),
+                "iterations_used"  : attempt,
+                "max_iterations"   : MAX_ITER,
+                "ltn_threshold"    : LTN_THRESHOLD,
+                "brain_records"    : brain_records,
+                "run_id"           : run_id,
+                "iteration_history": iteration_history,
+                "user_prompt"      : user_prompt.strip(),
+                "llm_provider"     : _prov["id"],
+                "llm_model"        : _model_choice,
+                "llm_provider_name": _provider_name,
+            })
+            st.session_state.results           = results
+            st.session_state.brain_records      = brain_records
+            st.session_state['_pipeline_running'] = False
+            st.rerun()
+
+        except Exception as _pipeline_exc:
+            raise _pipeline_exc
+        finally:
+            # Always clear — catches st.stop(), st.rerun(), and any exception
+            st.session_state['_pipeline_running'] = False
 
     # ══════════════════════════════════════════════════════════════════════════
     # RESULTS TABS
@@ -1924,17 +1933,32 @@ with col_right:
             passed_count = sum(1 for r in audit if r.get("satisfies"))
             failed_count = len(audit) - passed_count
 
+            no_rules = res.get("no_rules", False)
             if score is not None:
-                sc = "score-pass" if score >= thresh else ("score-warn" if score >= 0.5 else "score-fail")
-                vt = "VERIFIED ✓" if passed else ("MARGINAL ⚠" if score >= 0.5 else "FAILED ✗")
-                vc = "#6dcea8"   if passed else ("#e8c06d" if score >= 0.5 else "#e8736d")
+                # Bug A fix: show NO RULES warning instead of misleading VERIFIED
+                # when no rules were added — LTN 0.0000 is vacuous, not a real score.
+                if no_rules:
+                    sc, vt, vc = "score-warn", "NO RULES ⚠", "#e8c06d"
+                    score_label = "No constraint rules were provided — draft generated but not verified."
+                else:
+                    sc = "score-pass" if score >= thresh else ("score-warn" if score >= 0.5 else "score-fail")
+                    vt = "VERIFIED ✓" if passed else ("MARGINAL ⚠" if score >= 0.5 else "FAILED ✗")
+                    vc = "#6dcea8"   if passed else ("#e8c06d" if score >= 0.5 else "#e8736d")
+                    score_label = f"LTN Universal Verification Score (threshold: {thresh:.2f})"
                 st.markdown(f"""
                 <div class="glass-panel" style="text-align:center;padding:1.6rem;">
                     <div class="score-big {sc}">{score:.4f}</div>
                     <div style="font-family:'DM Mono',monospace;font-size:0.85rem;color:{vc};font-weight:600;letter-spacing:0.1em;margin-top:0.2rem;">{vt}</div>
-                    <div class="score-label" style="margin-top:0.3rem;">LTN Universal Verification Score (threshold: {thresh:.2f})</div>
+                    <div class="score-label" style="margin-top:0.3rem;">{score_label}</div>
                     <div style="font-size:0.68rem;color:rgba(200,169,110,0.6);margin-top:0.4rem;font-family:'DM Mono',monospace;">Generated by {res.get('llm_provider_name','Claude')} · {res.get('llm_model','')}</div>
                 </div>""", unsafe_allow_html=True)
+                if no_rules:
+                    st.warning(
+                        "⚠️ **No rules were added before running.** The draft was generated "
+                        "but no constraints were verified. Add rules in the left panel and "
+                        "re-run to get a real LTN verification score.",
+                        icon="📏"
+                    )
 
             if audit:
                 c1,c2,c3,c4 = st.columns(4)
@@ -2353,10 +2377,36 @@ with col_right:
             _sources = res.get("sources", [])
             _n_pass  = sum(1 for r in _audit if r.get("satisfies"))
             _n_fail  = len(_audit) - _n_pass
-            _verdict = "PASSED" if _passed else "DID NOT PASS"
-            _v_color = "#6dcea8" if _passed else "#e8736d"
+            _no_rules_flag = res.get("no_rules", False)
+            _verdict = ("NOT VERIFIED — NO RULES" if _no_rules_flag
+                        else ("PASSED" if _passed else "DID NOT PASS"))
+            _v_color = "#e8c06d" if _no_rules_flag else ("#6dcea8" if _passed else "#e8736d")
 
             # ── Section 1: Plain-English Summary ─────────────────────────────
+            if _no_rules_flag:
+                _summary_body = (
+                    "No constraint rules were provided before running. The system generated "
+                    "a draft but performed no verification — there were nothing to check "
+                    "against. The LTN score is 0.0 because the pMeanError aggregator had "
+                    "zero entities as input. To get a real verification result, add rules "
+                    "in the left panel and re-run."
+                )
+            else:
+                _summary_body = (
+                    f"You asked the system to generate content and verify it against "
+                    f"<strong style=\"color:#c8a96e\">{len(_rules)} rules</strong>. "
+                    f"The system {'researched the topic online and ' if _sources else ''}"
+                    f"parsed your rules into formal logical constraints, generated a draft, "
+                    f"then mathematically checked every rule against the output. "
+                    f"After <strong style=\"color:#c8a96e\">{_iters} iteration{'s' if _iters > 1 else ''}</strong> "
+                    f"of generate → verify → rewrite, the final LTN score was "
+                    f"<strong style=\"color:{_v_color}\">{_score:.4f}</strong> "
+                    f"(threshold {_thresh:.2f}) — the run "
+                    f"<strong style=\"color:{_v_color}\">{_verdict}</strong>."
+                    + (f"<br><br><em style='color:rgba(232,228,220,0.45);font-size:0.82rem;'>"
+                       f"The system rewrote the draft {_iters-1} time(s) based on specific "
+                       f"violation feedback before reaching this result.</em>" if _iters > 1 else "")
+                )
             st.markdown(f"""
 <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);
      border-radius:16px;padding:1.4rem 1.6rem;margin-bottom:1.2rem;">
@@ -2364,14 +2414,7 @@ with col_right:
     What happened in this run?
   </div>
   <p style="font-size:0.88rem;color:rgba(232,228,220,0.7);line-height:1.75;margin:0;">
-    You asked the system to generate content and verify it against <strong style="color:#c8a96e">{len(_rules)} rules</strong>.
-    The system {"researched the topic online and " if _sources else ""}parsed your rules into formal logical constraints,
-    generated a draft, then mathematically checked every rule against the output.
-    After <strong style="color:#c8a96e">{_iters} iteration{"s" if _iters > 1 else ""}</strong> of generate → verify → rewrite,
-    the final LTN verification score was
-    <strong style="color:{_v_color}">{_score:.4f}</strong> against a pass threshold of {_thresh:.2f}
-    — the run <strong style="color:{_v_color}">{_verdict}</strong>.
-    {f"<br><br><em style='color:rgba(232,228,220,0.45);font-size:0.82rem;'>The system rewrote the draft {_iters-1} time(s) based on specific violation feedback before reaching this result.</em>" if _iters > 1 else ""}
+    {_summary_body}
   </p>
 </div>""", unsafe_allow_html=True)
 
