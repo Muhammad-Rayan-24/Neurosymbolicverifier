@@ -504,10 +504,15 @@ def _web_search_fetch(query_text, api_key=None, llm_config=None,
             context = None
             if i in fetch_tasks:
                 fetched = fetch_tasks[i].result()
-                if fetched["context"] not in _FAILED_CONTEXTS:
+                # Bug fix: use _is_valid_source() (the authoritative filter) instead
+                # of the partial _FAILED_CONTEXTS set.  The set only covers 3 exact
+                # strings — dynamic error messages like "HTTP 404 fetching ..." or
+                # "Failed to fetch ...: ConnectionError" pass through as valid content
+                # and end up injected into the generation prompt.
+                if _is_valid_source(fetched):
                     context = fetched["context"][:max_chars_per_source]
 
-            # Fall back to the search snippet if fetch failed
+            # Fall back to the search snippet if fetch failed or was filtered
             if not context and body:
                 context = body[:max_chars_per_source]
 
@@ -571,7 +576,8 @@ def _google_search_fetch(query_text, api_key_google, cx,
             context = None
             if i in tasks:
                 fetched = tasks[i].result()
-                if fetched["context"] not in _FAILED_CONTEXTS:
+                # Bug fix: use _is_valid_source() — same reason as _web_search_fetch.
+                if _is_valid_source(fetched):
                     context = fetched["context"][:max_chars]
             if not context and snippet:
                 context = snippet[:max_chars]
