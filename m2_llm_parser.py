@@ -321,7 +321,22 @@ Rules:
 - For strict rules: < 10 and value==10 → compliance_score=0.0
 - NEVER set satisfies=false while also writing an explanation that confirms the
   rule is met — if your explanation says the rule passes, compliance_score must
-  be >= 0.5 and satisfies must be true."""
+  be >= 0.5 and satisfies must be true.
+- DODGE-PASS DETECTION — CRITICAL: A rule that requires substantive content
+  (e.g. "discuss X", "explain Y", "cover topic Z", "provide information about W")
+  is NOT satisfied by a response that merely refuses, disclaims, or explains it
+  cannot provide the content. Saying "I cannot answer this" or "I lack data on
+  this topic" while producing zero substantive content about the required subject
+  is a FAIL (compliance_score=0.0), not a pass. The rule requires the content to
+  EXIST in the draft, not just for off-topic content to be absent.
+  Examples of dodge-passes to catch and score 0.0:
+    Rule: "only discuss events in Iran in 2026"
+    BAD draft: "I cannot provide 2026 events due to my knowledge cutoff."
+    → FAIL — no 2026 Iran events are discussed at all, the rule is not met.
+    Rule: "include at least 3 examples of neural networks"
+    BAD draft: "I don't have enough information to provide neural network examples."
+    → FAIL — zero examples present.
+  A disclaimer alone is never sufficient to satisfy a content-requirement rule."""
 
     try:
         t0  = time.perf_counter()
@@ -382,7 +397,11 @@ Return ONLY raw JSON with graded compliance_score [0.0-1.0]:
   "scope_note": "<which occurrence>",
   "satisfies": <true if score >= 0.5>,
   "explanation": "<one sentence>"
-}}"""
+}}
+
+DODGE-PASS DETECTION: A rule requiring substantive content (discuss X, explain Y,
+cover topic Z) is NOT satisfied by a response that only disclaims or refuses.
+"I cannot provide this information" with zero relevant content = compliance_score 0.0."""
     try:
         raw     = _call_llm(prompt, (llm_config or {"provider":"anthropic","model":"claude-sonnet-4-6","api_key":api_key}), max_tokens=512)
         clean   = raw.strip().replace("```json", "").replace("```", "").strip()
